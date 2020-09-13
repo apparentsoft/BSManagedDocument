@@ -119,26 +119,7 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
     if (!_managedObjectContext)
     {
         // Need 10.7+ to support concurrency types
-        __block NSManagedObjectContext *context;
-        if ([NSManagedObjectContext instancesRespondToSelector:@selector(initWithConcurrencyType:)])
-        {
-            context = [[self.class.managedObjectContextClass alloc] initWithConcurrencyType:NSMainQueueConcurrencyType];
-        }
-        else
-        {
-            // On 10.6, context MUST be created on the thread/queue that's going to use it
-            if (NSThread.isMainThread)
-            {
-                context = [[self.class.managedObjectContextClass alloc] init];
-            }
-            else
-            {
-                dispatch_sync(dispatch_get_main_queue(), ^{
-                    context = [[self.class.managedObjectContextClass alloc] init];
-                });
-            }
-        }
-        
+        NSManagedObjectContext *context = [[self.class.managedObjectContextClass alloc] initWithConcurrencyType:NSMainQueueConcurrencyType];
         [self setManagedObjectContext:context];
 #if ! __has_feature(objc_arc)
         [context release];
@@ -184,28 +165,17 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
         self.undoManager = context.undoManager;
     };
 
-    // Need 10.7+ to support parent context
-    if ([context respondsToSelector:@selector(setParentContext:)])
-    {
-        // macOS 10.7 or later
-        [context performBlockAndWait:setUndoManagerBlock];
+    [context performBlockAndWait:setUndoManagerBlock];
          
-        NSManagedObjectContext *parentContext = [[self.class.managedObjectContextClass alloc] initWithConcurrencyType:NSPrivateQueueConcurrencyType];
-        parentContext.undoManager = nil; // no point in it supporting undo
-        parentContext.persistentStoreCoordinator = _coordinator;
+    NSManagedObjectContext *parentContext = [[self.class.managedObjectContextClass alloc] initWithConcurrencyType:NSPrivateQueueConcurrencyType];
+    parentContext.undoManager = nil; // no point in it supporting undo
+    parentContext.persistentStoreCoordinator = _coordinator;
         
-        context.parentContext = parentContext;
+    context.parentContext = parentContext;
 
 #if !__has_feature(objc_arc)
-        [parentContext release];
+    [parentContext release];
 #endif
-    }
-    else
-    {
-        // macOS 10.6 or earlier
-        setUndoManagerBlock();
-        context.persistentStoreCoordinator = _coordinator;
-    }
 
 #if __has_feature(objc_arc)
     _managedObjectContext = context;
@@ -342,13 +312,13 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
 //        // 10.10 and later
 //        [_coordinator performBlockAndWait:addPersistentStoreBlock];
 //    } else
-    if ([_managedObjectContext respondsToSelector:@selector(performBlockAndWait:)]) {
+    if (_managedObjectContext) {
         // On 10.7 - 10.9, use the context's performBlockAndWait: - BUT ONLY IF THE CONTEXT
         // ALREADY EXISTS. Creating a context on this thread (which self.managedObjectContext
         // will do) can result in a deadlock with the Version Browser.
         [_managedObjectContext performBlockAndWait:addPersistentStoreBlock];
     } else {
-        // If the context doesn't exist, or if we're on 10.6, then we don't worry about notifications
+        // If the context doesn't exist, then we don't worry about notifications
         // posting on the wrong thread, so just do the work on this thread.
         addPersistentStoreBlock();
     }
@@ -368,18 +338,8 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
                                             error:(NSError **)error
 {
     // On 10.8+, the coordinator whinges but doesn't fail if you leave out NSReadOnlyPersistentStoreOption and the file turns out to be read-only. Supplying a value makes it fail with a (not very helpful) error when the store is read-only
-    BOOL readonly = ([self respondsToSelector:@selector(isInViewingMode)] && self.isInViewingMode);
-    
     NSDictionary<NSString *,id> *options = @{
-                              // For apps linked against 10.9+ and supporting 10.6 still, use the old
-                              // style journal. Since the journal lives alongside the persistent store
-                              // I figure there's a chance it could be copied from a new Mac to an old one
-                              // https://developer.apple.com/library/mac/releasenotes/DataManagement/WhatsNew_CoreData_OSX/index.html
-#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_9 && MAC_OS_X_VERSION_MIN_REQUIRED <= MAC_OS_X_VERSION_10_6
-                              NSSQLitePragmasOption : @{ @"journal_mode" : @"DELETE" },
-#endif
-                              
-                              NSReadOnlyPersistentStoreOption : @(readonly)
+                              NSReadOnlyPersistentStoreOption : @(self.isInViewingMode)
                               };
 
     return [self configurePersistentStoreCoordinatorForURL:storeURL
@@ -518,7 +478,7 @@ operation is completed.
     if ([_coordinator respondsToSelector:@selector(performBlockAndWait:)]) {
         // (10.10 and later)
         [_coordinator performBlockAndWait:removePersistentStoreBlock];
-    } else if ([_managedObjectContext respondsToSelector:@selector(performBlockAndWait:)]) {
+    } else if (_managedObjectContext) {
         // (10.7 - 10.9, and a context already exists)
         // In my testing, HAVE to do the removal using parent's private queue.
         // Otherwise, it deadlocks, trying to acquire a _PFLock
@@ -528,7 +488,7 @@ operation is completed.
         }
         [context performBlockAndWait:removePersistentStoreBlock];
     } else {
-        // If there's not an existing context, or we're on 10.6, any thread should be fine
+        // If there's not an existing context, any thread should be fine
         removePersistentStoreBlock();
     }
 #if !__has_feature(objc_arc)
@@ -646,15 +606,12 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
      Wrapping the call to -save: in -performBlockAndWait:, below, fixed it. */
     NSError* __block blockError = nil;
     NSManagedObjectContext *context = self.managedObjectContext;
-    if ([context respondsToSelector:@selector(performBlockAndWait:)])
-    {
-        [context performBlockAndWait:^{
-            ok = [context save:&blockError];
+    [context performBlockAndWait:^{
+        ok = [context save:&blockError];
 #if !__has_feature(objc_arc)
-            [blockError retain];
+        [blockError retain];
 #endif
-        }];
-    }
+    }];
 #if !__has_feature(objc_arc)
     [blockError autorelease];
 #endif
@@ -749,7 +706,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
                         if (!autosaveURL)
                         {
                             // Make a copy of the existing doc to a location we control first
-                            NSURL *autosaveTempDirectory = [[NSFileManager defaultManager] URLForDirectory:NSItemReplacementDirectory
+                            NSURL *autosaveTempDirectory = [NSFileManager.defaultManager URLForDirectory:NSItemReplacementDirectory
                                                                                                   inDomain:NSUserDomainMask
                                                                                          appropriateForURL:fileURL
                                                                                                     create:YES
@@ -920,20 +877,10 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
     
     BOOL result = NO;
     NSFileManager *fileManager = NSFileManager.defaultManager;
-    if ([fileManager respondsToSelector:
-        @selector(createDirectoryAtURL:withIntermediateDirectories:attributes:error:)]) {
-        // macOS 10.7 or later
-        result = [fileManager createDirectoryAtURL:url
-                       withIntermediateDirectories:NO
-                                        attributes:attributes
-                                             error:error];
-    } else {
-        // macOS 10.6 or earlier
-        result = [fileManager createDirectoryAtPath:url.path
-                        withIntermediateDirectories:NO
-                                         attributes:attributes
-                                              error:error];
-    }
+    result = [fileManager createDirectoryAtURL:url
+                   withIntermediateDirectories:NO
+                                    attributes:attributes
+                                         error:error];
     if (!result)
     {
         [self spliceErrorWithCode:478219
@@ -948,19 +895,10 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
     if (storeContent)
     {
         NSURL *storeContentURL = [url URLByAppendingPathComponent:storeContent];
-        
-        if ([fileManager respondsToSelector:
-            @selector(createDirectoryAtURL:withIntermediateDirectories:attributes:error:)]) {
-             result = [fileManager createDirectoryAtURL:storeContentURL
-                            withIntermediateDirectories:NO
-                                             attributes:attributes
-                                                  error:error];
-        } else {
-            result = [fileManager createDirectoryAtPath:storeContentURL.path
-                            withIntermediateDirectories:NO
-                                             attributes:attributes
-                                                  error:error];
-        }
+        result = [fileManager createDirectoryAtURL:storeContentURL
+                       withIntermediateDirectories:NO
+                                        attributes:attributes
+                                             error:error];
 
         if (!result)
         {
@@ -1099,7 +1037,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
             }
 			
 			// And can finally declare we're done
-            if ([NSThread isMainThread])
+            if (NSThread.isMainThread)
             {
                 fileAccessCompletionHandler();
                 if (completionHandler) completionHandler(error);
@@ -1179,8 +1117,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 	if ([NSWorkspace.sharedWorkspace type:self.fileType conformsToType:typeName]) {
         
 		// At this point, we've either captured all document content, or are writing on the main thread, so it's fine to unblock the UI
-		if ([self respondsToSelector:@selector(unblockUserInteraction)]) [self unblockUserInteraction];
-		
+		[self unblockUserInteraction];
 		
         if (saveOperation == NSSaveOperation || saveOperation == NSAutosaveInPlaceOperation ||
             (saveOperation == NSAutosaveElsewhereOperation && [absoluteURL isEqual:self.autosavedContentsFileURL]))
@@ -1188,10 +1125,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
             NSURL *backupURL = nil;
             
 			// As of 10.8, need to make a backup of the document when saving in-place
-			// Unfortunately, it turns out 10.7 includes -backupFileURL, just that it's private. Checking AppKit number seems to be our best bet, and I have to hardcode that since 10_8 is not defined in the SDK yet. (1187 was found simply by looking at the GM)
-			if (NSAppKitVersionNumber >= 1187 &&
-				[self respondsToSelector:@selector(backupFileURL)] &&
-				(saveOperation == NSSaveOperation || saveOperation == NSAutosaveInPlaceOperation) &&
+			if ((saveOperation == NSSaveOperation || saveOperation == NSAutosaveInPlaceOperation) &&
 				self.class.preservesVersions)			// otherwise backupURL has a different meaning
 			{
 				backupURL = self.backupFileURL;
@@ -1358,30 +1292,11 @@ originalContentsURL:(NSURL *)originalContentsURL
 
 - (void)setBundleBitForDirectoryAtURL:(NSURL *)url;
 {
-#if (defined MAC_OS_X_VERSION_10_8) && MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_8   // have to check as NSURLIsPackageKey only became writable in 10.8
     NSError *error;
     if (![url setResourceValue:@YES forKey:NSURLIsPackageKey error:&error])
     {
         NSLog(@"Error marking document as a package: %@", error);
     }
-#else
-    FSRef fileRef;
-    if (CFURLGetFSRef((CFURLRef)url, &fileRef))
-    {
-        FSCatalogInfo fileInfo;
-        OSErr error = FSGetCatalogInfo(&fileRef, kFSCatInfoFinderInfo, &fileInfo, NULL, NULL, NULL);
-        
-        if (!error)
-        {
-            FolderInfo *finderInfo = (FolderInfo *)fileInfo.finderInfo;
-            finderInfo->finderFlags |= kHasBundle;
-            
-            error = FSSetCatalogInfo(&fileRef, kFSCatInfoFinderInfo, &fileInfo);
-        }
-        
-        if (error) NSLog(@"OSError %i setting bundle bit for %@", error, [url path]);
-    }
-#endif
 }
 
 - (BOOL)writeStoreContentToURL:(NSURL *)storeURL error:(NSError **)error;
@@ -1390,58 +1305,37 @@ originalContentsURL:(NSURL *)originalContentsURL
     __block BOOL result = [self updateMetadataForPersistentStore:_store error:error];
     if (!result) return NO;
     
-    
-    // On 10.6 saving is just one call, all on main thread. 10.7+ have to work on the context's private queue
-    NSManagedObjectContext *context = self.managedObjectContext;
-    
-    if ([context respondsToSelector:@selector(parentContext)])
-    {
-        [self unblockUserInteraction];
-        result = [self preflightURL:storeURL thenSaveContext:context.parentContext error:error];
-    }
-    else
-    {
-        result = [self preflightURL:storeURL thenSaveContext:context error:error];
-    }
-    
-    
-    return result;
+    // On 10.7+ we have to work on the context's private queue
+    [self unblockUserInteraction];
+    return [self preflightURL:storeURL thenSaveContext:self.managedObjectContext.parentContext error:error];
 }
 
 - (BOOL)preflightURL:(NSURL *)storeURL thenSaveContext:(NSManagedObjectContext *)context error:(NSError **)error;
 {
     // Preflight the save since it tends to crash upon failure pre-Mountain Lion. rdar://problem/10609036
     NSNumber *writable = nil;
-#if (defined MAC_OS_X_VERSION_10_7) && MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_7
     if (![storeURL getResourceValue:&writable forKey:NSURLIsWritableKey error:error])
         return NO;
-#else
-    writable = @([NSFileManager.defaultManager isWritableFileAtPath:storeURL.path]);
-#endif
     
     if (writable.boolValue)
     {
         // Ensure store is saving to right location
         if ([_coordinator setURL:storeURL forPersistentStore:_store])
         {
-            if ([context respondsToSelector:@selector(performBlockAndWait:)]) {
-                __block BOOL result = NO;
-                [context performBlockAndWait:^{
-                    result = [context save:error];
+            __block BOOL result = NO;
+            [context performBlockAndWait:^{
+                result = [context save:error];
                     
 #if ! __has_feature(objc_arc)
-                    // Errors need special handling to guarantee surviving crossing the block. http://www.mikeabdullah.net/cross-thread-error-passing.html
-                    if (!result && error) [*error retain];
+                // Errors need special handling to guarantee surviving crossing the block. http://www.mikeabdullah.net/cross-thread-error-passing.html
+                if (!result && error) [*error retain];
 #endif
-                }];
+            }];
                 
 #if ! __has_feature(objc_arc)
-                if (!result && error) [*error autorelease]; // tidy up since any error was retained on worker thread
+            if (!result && error) [*error autorelease]; // tidy up since any error was retained on worker thread
 #endif
-                return result;
-            }
-            
-            return [context save:error];
+            return result;
         }
     }
     
@@ -1468,7 +1362,7 @@ originalContentsURL:(NSURL *)originalContentsURL
 - (void)setFileURL:(NSURL *)absoluteURL
 {
     // Mark persistent store as moved
-    if (![self autosavedContentsFileURL])
+    if (!self.autosavedContentsFileURL)
     {
         [self setURLForPersistentStoreUsingFileURL:absoluteURL];
     }

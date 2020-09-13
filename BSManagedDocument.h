@@ -57,6 +57,7 @@ extern NSString* BSManagedDocumentErrorDomain ;
 
 typedef BOOL (^WritingBlockType) (NSURL*, NSSaveOperationType, NSURL*, NSError**);
 
+API_AVAILABLE(macos(10.8))
 __attribute__((visibility("default"))) @interface BSManagedDocument : NSDocument
 {
   @private  // still targeting legacy runtime, so YES, I need to declare the ivars
