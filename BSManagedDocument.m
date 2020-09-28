@@ -635,9 +635,15 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
     // __weak was meaningless in non-ARC; generates a compiler warning
     BSManagedDocument* welf = self;
 #endif
-    
+#if DEBUG
+        NSLog(@"1 welf is %@", welf) ;
+#endif
+
     self.writingBlock = ^(NSURL *url, NSSaveOperationType saveOperation, NSURL *originalContentsURL, NSError **error) {
-        
+#if DEBUG
+        NSLog(@"2 welf is %@", welf) ;
+#endif
+
         // For the first save of a document, create the folders on disk before we do anything else
         // Then setup persistent store appropriately
         BOOL result = YES;
@@ -645,6 +651,9 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         
         if (![welf store])
         {
+#if DEBUG
+            NSLog(@"3 welf is %@", welf) ;
+#endif
             result = [welf createPackageDirectoriesAtURL:url
                                                   ofType:typeName
                                         forSaveOperation:saveOperation
@@ -675,6 +684,9 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         }
         else if (saveOperation == NSSaveAsOperation)
         {
+#if DEBUG
+            NSLog(@"4 welf is %@", welf) ;
+#endif
             // Copy the whole package to the new location, not just the store content
             if (![welf writeBackupToURL:url error:error])
             {
@@ -688,6 +700,10 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         }
         else
         {
+#if DEBUG
+        NSLog(@"5 welf is %@", welf) ;
+#endif
+
             if (welf.class.autosavesInPlace)
             {
                 if (saveOperation == NSAutosaveElsewhereOperation)
@@ -815,13 +831,52 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
             }
         }
         
+#if !__has_feature(objc_arc)
+        [welf retain];
+#endif
+#if DEBUG
+        NSLog(@"6 welf is %@", welf) ;
+#endif
         // Right, let's get on with it!
         if (![welf writeStoreContentToURL:storeURL error:error])
         {
             [welf signalDoneAndMaybeClose];
+#if !__has_feature(objc_arc)
+            [welf release];
+#endif
             return NO;
         }
         
+#if DEBUG
+        NSLog(@"7 welf is %@", welf) ;
+#endif
+        /* 2020-May-17  Damn.  Still seeing crashes here
+         once a week or so when running in Xcode debugger in non-ARC, possibly
+         after letting a dialog sit without responding for several minutes,
+         or maybe just letting the app sit idle for a few minutes.
+         I have seen two types of crashes:
+         
+         1.  Unexplained EXC_BAD_ACCESS
+         2.  -[CAContextImpl writeAdditionalContent:toURL:originalContentsURL:error:]: unrecognized selector sent to instance …
+         
+         Crash type number 2 implies that the weak self `welf` is gone and the
+         message is being sent to some other object which took its memory, but
+         why does it crash *here* when, in the lines above, many messages are
+         sent to `welf` and none of those ever crash?
+         
+         Maybe the call to -writeStoreContentToURL:error: waits for the save
+         to happen, and that is when `welf` disappears.  To save time, I am
+         going to skip the analysis and try to fix this with something that
+         should do no harm in any case: Send `welf` a -retain above and balance
+         with a -release before each of the two `return` statements, below.
+         If you see no further comment here for the rest of year 2020, that
+         means that this fix worked.  It does make sense, at least :)
+         
+         2020-Jul-14  Still making crashes here, with macOS 11 Beta 2.
+         Looks like the same as crash type 2 above, but welf got smashed
+         by a different object:
+         -[_NSCoreDataTaggedObjectID writeAdditionalContent:toURL:originalContentsURL:error:]: unrecognized selector sent to instance
+         */
         result = [welf writeAdditionalContent:additionalContent toURL:url originalContentsURL:originalContentsURL error:error];
         if (result)
         {
@@ -842,6 +897,9 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
                         likelyCulprit:url
                          intoOutError:error];
             [welf signalDoneAndMaybeClose];
+#if !__has_feature(objc_arc)
+            [welf release];
+#endif
             return NO;
         }
         
@@ -855,6 +913,9 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         }
         
         [welf signalDoneAndMaybeClose];
+#if !__has_feature(objc_arc)
+        [welf release];
+#endif
         return result;
     };
     
