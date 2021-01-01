@@ -117,18 +117,14 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
     return fileURL;
 }
 
-- (void)setupPersistentContainer {
-    _container = [[NSPersistentContainer alloc] initWithName:[[self class] persistentStoreName]
-                                          managedObjectModel:[self managedObjectModel]];
-}
-
 - (BOOL)isCoordinatorConfigured {
     return _container.persistentStoreCoordinator.persistentStores.count > 0;
 }
 
 - (NSPersistentContainer *)container {
     if (!_container) {
-        [self setupPersistentContainer];
+        _container = [[NSPersistentContainer alloc] initWithName:[[self class] persistentStoreName]
+                                              managedObjectModel:[self managedObjectModel]];
     }
     return _container;
 }
