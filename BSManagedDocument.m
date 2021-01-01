@@ -131,7 +131,9 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
 
 - (NSManagedObjectContext *)managedObjectContext;
 {
-    return self.container.viewContext;
+    // It is an error to return the viewContext if the persistent stores haven't been loaded,
+    // so use the _container ivar instead of trying to instantiate it via the property.
+    return _container.viewContext;
 }
 
 // Allow subclasses to have custom undo managers. Return nil for no manager
@@ -443,39 +445,6 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         if (outError) NSAssert(*outError != nil, @"-additionalContentForURL:saveOperation:error: failed with a nil error");
         [self signalDoneAndMaybeClose];
         ok = NO;
-    }
-    
-    
-    // On 10.7+, save the main context, ready for parent to be saved in a moment
-    /* Jerry says: With Core Data thread checking on, I was getting the
-     familiar "All that is left to us is honor" exceptions here when my
-     document was saved, on 20180909.  I think this may have started when I
-     tried it with asynchronous saving ON for a time.  (That is, I changed my
-     subclass' override of -canAsynchronouslyWriteToURL:::: to return YES.)
-     Wrapping the call to -save: in -performBlockAndWait:, below, fixed it. */
-    NSError* __block blockError = nil;
-    NSManagedObjectContext *context = self.managedObjectContext;
-    [context performBlockAndWait:^{
-        ok = [context save:&blockError];
-#if !__has_feature(objc_arc)
-        [blockError retain];
-#endif
-    }];
-#if !__has_feature(objc_arc)
-    [blockError autorelease];
-#endif
-    if (outError && blockError) {
-        *outError = blockError;
-    }
-    if (!ok)
-    {
-        [self signalDoneAndMaybeClose];
-        if (outError && !*outError)
-        {
-            *outError = [NSError errorWithDomain:BSManagedDocumentErrorDomain
-                                            code:478221
-                                        userInfo:@{ NSLocalizedDescriptionKey : @"Unspecified error saving Core Data MOC" }];
-        }
     }
     
 #if __has_feature(objc_arc)
@@ -1154,52 +1123,39 @@ originalContentsURL:(NSURL *)originalContentsURL
     __block BOOL result = [self updateMetadataForPersistentStore:self.store error:error];
     if (!result) return NO;
     
-    // On 10.7+ we have to work on the context's private queue
     [self unblockUserInteraction];
-    NSManagedObjectContext *privateContext = self.container.newBackgroundContext;
-    result = [self preflightURL:storeURL thenSaveContext:privateContext error:error];
-#if !__has_feature(objc_arc)
-    [privateContext release];
-#endif
-    return result;
-}
 
-- (BOOL)preflightURL:(NSURL *)storeURL thenSaveContext:(NSManagedObjectContext *)context error:(NSError **)error;
-{
     // Preflight the save since it tends to crash upon failure pre-Mountain Lion. rdar://problem/10609036
     NSNumber *writable = nil;
     if (![storeURL getResourceValue:&writable forKey:NSURLIsWritableKey error:error])
         return NO;
     
-    if (writable.boolValue)
-    {
-        // Ensure store is saving to right location
-        if ([self.coordinator setURL:storeURL forPersistentStore:self.store])
-        {
-            __block BOOL result = NO;
-            [context performBlockAndWait:^{
-                result = [context save:error];
-                    
-#if ! __has_feature(objc_arc)
-                // Errors need special handling to guarantee surviving crossing the block. http://www.mikeabdullah.net/cross-thread-error-passing.html
-                if (!result && error) [*error retain];
-#endif
-            }];
-                
-#if ! __has_feature(objc_arc)
-            if (!result && error) [*error autorelease]; // tidy up since any error was retained on worker thread
-#endif
-            return result;
+    // Ensure store is writeable and saving to right location
+    if (!writable.boolValue || ![self.coordinator setURL:storeURL forPersistentStore:self.store]) {
+        if (error) {
+            // Generic error. Doc/error system takes care of supplying a nice generic message to go with it
+            *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteNoPermissionError userInfo:nil];
         }
+        
+        return NO;
     }
     
-    if (error)
-    {
-        // Generic error. Doc/error system takes care of supplying a nice generic message to go with it
-        *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteNoPermissionError userInfo:nil];
-    }
-    
-    return NO;
+    // On 10.7+ we have to work on the context's private queue
+    NSManagedObjectContext *savingContext = self.managedObjectContext;
+
+    [savingContext performBlockAndWait:^{
+        result = [savingContext save:error];
+            
+#if ! __has_feature(objc_arc)
+        // Errors need special handling to guarantee surviving crossing the block. http://www.mikeabdullah.net/cross-thread-error-passing.html
+        if (!result && error) [*error retain];
+#endif
+    }];
+        
+#if ! __has_feature(objc_arc)
+    if (!result && error) [*error autorelease]; // tidy up since any error was retained on worker thread
+#endif
+    return result;
 }
 
 #pragma mark NSDocument
