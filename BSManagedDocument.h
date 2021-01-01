@@ -57,14 +57,12 @@ extern NSString* BSManagedDocumentErrorDomain ;
 
 typedef BOOL (^WritingBlockType) (NSURL*, NSSaveOperationType, NSURL*, NSError**);
 
-API_AVAILABLE(macos(10.8))
+API_AVAILABLE(macos(10.12))
 __attribute__((visibility("default"))) @interface BSManagedDocument : NSDocument
 {
   @private  // still targeting legacy runtime, so YES, I need to declare the ivars
-    NSManagedObjectContext	*_managedObjectContext;
+    NSPersistentContainer	*_container;
     NSManagedObjectModel    *_managedObjectModel;
-	NSPersistentStore       *_store;
-    NSPersistentStoreCoordinator *_coordinator;
     
     WritingBlockType _writingBlock;
     
@@ -117,17 +115,6 @@ __attribute__((visibility("default"))) @interface BSManagedDocument : NSDocument
                      documentExtension:(NSString*)extension;
 
 /*!
- @brief    Returns the desired class of instances' managed object context
-
- @details  Subclasses may override.  The default implemenation returns
- NSManagedObjectContext.  When considering override, note Apple documentation:
- -- "You are strongly discouraged from subclassing NSManagedObjectContext."
- But a comment by Mike Abdullah in pre-2019 commits of the .m file implies
- that Karelia did this in their Sandvox app.
- */
-@property (nonatomic, class, readonly) Class managedObjectContextClass;
-
-/*!
  @brief    Returns the desired class of instances' undo manager
 
  @details  Subclasses may override.  In particular, subclasses may return nil
@@ -142,11 +129,9 @@ __attribute__((visibility("default"))) @interface BSManagedDocument : NSDocument
  Persistent documents always have a managed object context and a persistent
  store coordinator through that context.
  
- A default context is created on-demand. You can call
- `-setManagedObjectContext:` to substitute your own context instead. This will
- automatically supply a persistence stack for the context.
+ A default context is created on-demand.
  */
-@property (nonatomic, strong) NSManagedObjectContext *managedObjectContext;
+@property (nonatomic, strong, readonly) NSManagedObjectContext *managedObjectContext;
 
 /**
  The document's managed object model. (read-only)
@@ -176,6 +161,17 @@ __attribute__((visibility("default"))) @interface BSManagedDocument : NSDocument
  modifications to the store after migration.
  */
 - (BOOL)configurePersistentStoreCoordinatorForURL:(NSURL *)storeURL ofType:(NSString *)fileType modelConfiguration:(NSString *)configuration storeOptions:(NSDictionary *)storeOptions error:(NSError **)error;
+
+/**
+ Creates or loads the document’s persistent store. You may override this method instead of
+ `configurePersistentStoreCoordinatorForURL:ofType:modelConfiguration:storeOptions:error:`,
+ mutating the passed `description` object before calling `super`, for a more convenient experience.
+ @param description The description of the persistent store with all parameter set.
+ @param error Upon return, if a problem occurs, contains an error object that describes the problem.
+ @return `YES` if configuration is successful, otherwise `NO`.
+ */
+- (BOOL)configurePersistentStoreCoordinatorWithDescription:(NSPersistentStoreDescription *)description
+                                                     error:(NSError **)outError;
 
 /**
  Returns the Core Data store type for a given document file type.
