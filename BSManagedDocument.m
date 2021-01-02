@@ -35,6 +35,7 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
 @property (nonatomic, readonly) NSPersistentStoreCoordinator *coordinator;
 @property (nonatomic, readonly) NSPersistentStore *store;
 @property (nonatomic, readonly, getter=isCoordinatorConfigured) BOOL coordinatorConfigured;
+@property (readonly, copy) NSURL *mostRecentlySavedFileURL;
 
 @end
 
@@ -953,9 +954,14 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 		// At this point, we've either captured all document content, or are writing on the main thread, so it's fine to unblock the UI
 		[self unblockUserInteraction];
 		
+        // Note that duplicating an unsaved document takes place as an AutosaveElsewhere.
+        // So if we're autosaving-elsewhere to a location that's not our own autosavedContentsFileURL,
+        // skip this step and go to the "regular channels" code path outside this block
         if (saveOperation == NSSaveOperation || saveOperation == NSAutosaveInPlaceOperation ||
-            saveOperation == NSAutosaveElsewhereOperation) {
+            (saveOperation == NSAutosaveElsewhereOperation &&
+             ([absoluteURL isEqual:self.autosavedContentsFileURL] || !self.mostRecentlySavedFileURL))) {
             NSURL *backupURL = nil;
+            NSURL *autosavedContentsFileURL = self.autosavedContentsFileURL;
             
 			// As of 10.8, need to make a backup of the document when saving in-place
 			if ((saveOperation == NSSaveOperation || saveOperation == NSAutosaveInPlaceOperation) &&
@@ -1023,6 +1029,11 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
                 if ([absoluteURL getResourceValue:&modDate forKey:NSURLContentModificationDateKey error:NULL] && modDate)
                 {
                     self.fileModificationDate = modDate;
+                }
+                
+                // Restore the previous autosavedContentsFileURL if saving failed
+                if (saveOperation == NSAutosaveElsewhereOperation) {
+                    self.autosavedContentsFileURL = autosavedContentsFileURL;
                 }
             }
             
@@ -1154,7 +1165,7 @@ originalContentsURL:(NSURL *)originalContentsURL
         return NO;
     }
     
-    // On 10.7+ we have to work on the context's private queue
+    // On 10.12+ we can save on the viewContext, no private queue needed
     NSManagedObjectContext *savingContext = self.managedObjectContext;
 
     [savingContext performBlockAndWait:^{
