@@ -956,8 +956,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         // So if we're autosaving-elsewhere to a location that's not our own autosavedContentsFileURL,
         // skip this step and go to the "regular channels" code path outside this block
         if (saveOperation == NSSaveOperation || saveOperation == NSAutosaveInPlaceOperation ||
-            (saveOperation == NSAutosaveElsewhereOperation &&
-             ([absoluteURL isEqual:self.autosavedContentsFileURL] || !self.mostRecentlySavedFileURL))) {
+            saveOperation == NSAutosaveElsewhereOperation) {
             NSURL *backupURL = nil;
             NSURL *autosavedContentsFileURL = self.autosavedContentsFileURL;
             
@@ -986,22 +985,33 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 					}
 				}
             } else if (saveOperation == NSAutosaveElsewhereOperation) {
-                // If an autosave is forced early on in the document life cycle, the autosavedContentsFileURL
-                // might not be set. Go ahead and set it here so that NSDocument won't attempt to give the
-                // document a second autosave URL.
-                self.autosavedContentsFileURL = absoluteURL;
+                if (!self.mostRecentlySavedFileURL) {
+                    // If an autosave is forced early on in the document life cycle, the autosavedContentsFileURL
+                    // might not be set. Go ahead and set it here so that NSDocument won't attempt to give the
+                    // document a second autosave URL.
+                    self.autosavedContentsFileURL = absoluteURL;
+                } else if (![absoluteURL isEqual:self.autosavedContentsFileURL]) {
+                    // We're supposed to blast a copy out somewhere else e.g.:
+                    // * A temporary Share location
+                    // * A Duplicate location in the autosave folder
+                    // We ensured the disk copy is up-to-date earlier inside the overrides to
+                    // duplicateAndReturnError: and shareDocumentWithSharingService:completionHandler:
+                    self.writingBlock = ^(NSURL *url, NSSaveOperationType saveOperation, NSURL *originalContentsURL, NSError **error) {
+                        return [self writeBackupToURL:url error:error];
+                    };
+                }
             }
-			
 			
             // NSDocument attempts to write a copy of the document out at a temporary location.
             // Core Data cannot support this, so we override it to save directly.
-            // The following call is synchronous.  It does not return until
-            // saving ia all done
+            // The following call is synchronous.  It does not return until saving is all done.
             result = [self writeToURL:absoluteURL
                                ofType:typeName
                      forSaveOperation:saveOperation
                   originalContentsURL:self.fileURL
                                 error:outError];
+            
+            self.writingBlock = nil; // May have been set above
             
             if (!result)
             {
@@ -1071,23 +1081,14 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 
 - (BOOL)writeBackupToURL:(NSURL *)backupURL error:(NSError **)outError;
 {
-    NSURL *source = self.mostRecentlySavedFileURL;
-
-    BOOL ok;
     /* In case the user inadvertently clicks File > Duplicate on a new
      document which has not been saved yet, source will be nil, so
      we check for that to avoid a subsequent NSFileManager exception. */
-	if (source)
-    {
-        /* The following also copies any additional content in the package. */
-        ok = [NSFileManager.defaultManager copyItemAtURL:source toURL:backupURL error:outError];
-    }
-    else
-    {
-        ok = YES;
-    }
-
-    return ok;
+    if (!self.mostRecentlySavedFileURL)
+        return YES;
+    
+    return [NSFileManager.defaultManager copyItemAtURL:self.mostRecentlySavedFileURL
+                                                 toURL:backupURL error:outError];
 }
 
 - (BOOL)writeToURL:(NSURL *)inURL
@@ -1367,31 +1368,27 @@ originalContentsURL:(NSURL *)originalContentsURL
      with ARC in macOS 10.15.)  Anyhow, initializing variables is always a
      good practice!  */
     
-    // If the doc is brand new, have to force the autosave to write to disk
-    if (!self.fileURL && !self.autosavedContentsFileURL && !self.hasUnautosavedChanges)
-    {
-        [self updateChangeCount:NSChangeDone];
-        NSDocument *result = [self duplicateAndReturnError:outError];
-        [self updateChangeCount:NSChangeUndone];
-        return result;
-    }
-    
+    // Accessing the MOC ensures a backing store exists
+    (void)[self managedObjectContext];
     
     // Make sure copy on disk is up-to-date
     if (![self fakeSynchronousAutosaveAndReturnError:outError]) return nil;
     
-    
     // Let super handle the overall duplication so it gets the window-handling
-    // right. But use custom writing logic that actually copies the existing doc
-    BOOL (^writingBlock)(NSURL*, NSSaveOperationType, NSURL*, NSError**) = ^(NSURL *url, NSSaveOperationType saveOperation, NSURL *originalContentsURL, NSError **error) {
-        return [self writeBackupToURL:url error:error];
-    };
+    // The writing itself occurs as an "autosave elsewhere" to somewhere other
+    // than the autosavedContentsFileURL
+    return [super duplicateAndReturnError:outError];
+}
+
+- (void)shareDocumentWithSharingService:(NSSharingService *)sharingService completionHandler:(void (^)(BOOL))completionHandler API_AVAILABLE(macos(10.13)) {
+    // Accessing the MOC ensures a backing store exists
+    (void)[self managedObjectContext];
     
-    self.writingBlock = writingBlock;
-    NSDocument *result = [super duplicateAndReturnError:outError];
-    self.writingBlock = nil;
+    // Make sure copy on disk is up-to-date
+    if (![self fakeSynchronousAutosaveAndReturnError:nil]) return;
     
-    return result;
+    // As with file duplication, the actual save operation will be an "autosave elsewhere"
+    [super shareDocumentWithSharingService:sharingService completionHandler:completionHandler];
 }
 
 /*  Approximates a synchronous version of -autosaveDocumentWithDelegate:didAutosaveSelector:contextInfo:    */
