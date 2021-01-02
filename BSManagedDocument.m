@@ -31,7 +31,7 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
 @property(atomic, assign) BOOL isSaving;
 @property(atomic, assign) BOOL shouldCloseWhenDoneSaving;
 @property (atomic, copy) BOOL (^writingBlock)(NSURL*, NSSaveOperationType, NSURL*, NSError**);
-@property (nonatomic, readonly) NSPersistentContainer *container;
+@property (nonatomic, readonly) NSPersistentContainer *persistentContainer;
 @property (nonatomic, readonly) NSPersistentStoreCoordinator *coordinator;
 @property (nonatomic, readonly) NSPersistentStore *store;
 @property (nonatomic, readonly, getter=isCoordinatorConfigured) BOOL coordinatorConfigured;
@@ -121,7 +121,7 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
     return _container.persistentStoreCoordinator.persistentStores.count > 0;
 }
 
-- (NSPersistentContainer *)container {
+- (NSPersistentContainer *)persistentContainer {
     if (!_container) {
         _container = [[NSPersistentContainer alloc] initWithName:[[self class] persistentStoreName]
                                               managedObjectModel:[self managedObjectModel]];
@@ -131,9 +131,28 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
 
 - (NSManagedObjectContext *)managedObjectContext;
 {
+    NSPersistentContainer *container = self.persistentContainer;
+    
+    if (!self.isCoordinatorConfigured) {
+        // The viewContext returned by an unconfigured container can't be saved.
+        // In previous implementations / forks, an unsaved document would be backed
+        // by an unaffiliated managedObjectContext, which could be "saved" without
+        // disk backing, and which could be associated with a persistent store later.
+        // This kind of "late binding" isn't allowed under the NSPersistentContainer regime,
+        // and so we need the persistent store to be configured before accessing the context.
+        // The easiest way to do that without requiring changes to subclasses is to force
+        // a synchronous autosave before returning the context for the first time.
+        [self updateChangeCount:NSChangeDone];
+        [self autosaveWithImplicitCancellability:YES
+                               completionHandler:^(NSError *errorOrNil) {
+                                   [self updateChangeCount:NSChangeCleared];
+                               }];
+        [self performSynchronousFileAccessUsingBlock:^{ }];
+    }
+
     // It is an error to return the viewContext if the persistent stores haven't been loaded,
     // so use the _container ivar instead of trying to instantiate it via the property.
-    return _container.viewContext;
+    return container.viewContext;
 }
 
 // Allow subclasses to have custom undo managers. Return nil for no manager
@@ -155,7 +174,8 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
 
 - (BOOL)configurePersistentStoreCoordinatorWithDescription:(NSPersistentStoreDescription *)description
                                                      error:(NSError **)error_p {
-    __block NSError *error = nil ;
+    __block NSError *error = nil;
+    NSPersistentContainer *container = self.persistentContainer;
     void (^setUndoManagerBlock)(void) = ^{
         /* In macOS 10.11 and earler, the newly-initialized `context`
          typically found at this point will have a NSUndoManager.  But in
@@ -169,23 +189,24 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
             /* This branch will always execute, *except* when +undoManagerClass is
              overridden to return nil. */
             NSUndoManager *undoManager = [[self.class.undoManagerClass alloc] init];
-            self.container.viewContext.undoManager = undoManager;
+            container.viewContext.undoManager = undoManager;
 #if !__has_feature(objc_arc)
             [undoManager release];
 #endif
         }
-        self.undoManager = self.container.viewContext.undoManager;
+        self.undoManager = container.viewContext.undoManager;
     };
 
     description.shouldAddStoreAsynchronously = NO;
-    self.container.persistentStoreDescriptions = @[ description ];
-    [self.container loadPersistentStoresWithCompletionHandler:
+    container.persistentStoreDescriptions = @[ description ];
+    [container loadPersistentStoresWithCompletionHandler:
          ^(NSPersistentStoreDescription *addedDescription, NSError *addError) {
-            error = addError;
+        error = addError;
 #if ! __has_feature(objc_arc)
-            [error retain];
+        [error retain];
 #endif
-        [self.container.viewContext performBlockAndWait:setUndoManagerBlock];
+        if (!error)
+            [container.viewContext performBlockAndWait:setUndoManagerBlock];
     }];
     return (error == nil);
 }
@@ -338,29 +359,24 @@ operation is completed.
         return YES;
     
     NSPersistentStoreCoordinator *coordinator = self.coordinator;
-
-    void (^removePersistentStoreBlock)(void) = ^{
+    
+    // (10.10 and later)
+    [coordinator performBlockAndWait:^{
         result = [coordinator removePersistentStore:self.store error:&error];
 #if !__has_feature(objc_arc)
         [error retain];
 #endif
-    };
-    
-    // (10.10 and later)
-    [coordinator performBlockAndWait:removePersistentStoreBlock];
+    }];
     
 #if !__has_feature(objc_arc)
     [error autorelease];
 #endif
     
-    if (!result) {
-        if (outError) {
-            *outError = error;
-        }
-        return NO;
+    if (!result && outError) {
+        *outError = error;
     }
     
-    return YES;
+    return result;
 }
 
 - (BOOL)readFromURL:(NSURL *)absoluteURL ofType:(NSString *)typeName error:(NSError **)outError
@@ -421,11 +437,11 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
  */
 
 - (NSPersistentStoreCoordinator*)coordinator {
-    return self.container.persistentStoreCoordinator;
+    return self.persistentContainer.persistentStoreCoordinator;
 }
 
 - (NSPersistentStore *)store {
-    return self.container.persistentStoreCoordinator.persistentStores.firstObject;
+    return self.persistentContainer.persistentStoreCoordinator.persistentStores.firstObject;
 }
 
 #pragma mark Writing Document Data
@@ -938,8 +954,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 		[self unblockUserInteraction];
 		
         if (saveOperation == NSSaveOperation || saveOperation == NSAutosaveInPlaceOperation ||
-            (saveOperation == NSAutosaveElsewhereOperation && [absoluteURL isEqual:self.autosavedContentsFileURL]))
-        {
+            saveOperation == NSAutosaveElsewhereOperation) {
             NSURL *backupURL = nil;
             
 			// As of 10.8, need to make a backup of the document when saving in-place
@@ -966,7 +981,12 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
                         return NO;
 					}
 				}
-			}
+            } else if (saveOperation == NSAutosaveElsewhereOperation) {
+                // If an autosave is forced early on in the document life cycle, the autosavedContentsFileURL
+                // might not be set. Go ahead and set it here so that NSDocument won't attempt to give the
+                // document a second autosave URL.
+                self.autosavedContentsFileURL = absoluteURL;
+            }
 			
 			
             // NSDocument attempts to write a copy of the document out at a temporary location.
@@ -991,24 +1011,18 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
                 // autosaving being implicitly cancellable and a subclass deciding
                 // to bail out, this HAS to be done otherwise the doc system will
                 // weirdly complain that a file by the same name already exists
-                if (backupURL)
-                {
-                    NSError *error;
-                    if (![NSFileManager.defaultManager removeItemAtURL:backupURL error:&error])
-                    {
-                        NSLog(@"Unable to remove backup after failed write: %@", error);
-                    }
+                NSError *error;
+                if (backupURL && ![NSFileManager.defaultManager removeItemAtURL:backupURL error:&error]) {
+                    NSLog(@"Unable to remove backup after failed write: %@", error);
                 }
                 
                 // The -write… method maybe wasn't to know that it's writing to the live document, so might have modified it. #179730
                 // We can patch up a bit by updating modification date so user doesn't get baffling document-edited warnings again!
+                // Note that some file systems don't support mod date so we need to test that it's not nil
                 NSDate *modDate;
-                if ([absoluteURL getResourceValue:&modDate forKey:NSURLContentModificationDateKey error:NULL])
+                if ([absoluteURL getResourceValue:&modDate forKey:NSURLContentModificationDateKey error:NULL] && modDate)
                 {
-                    if (modDate)    // some file systems don't support mod date
-                    {
-                        self.fileModificationDate = modDate;
-                    }
+                    self.fileModificationDate = modDate;
                 }
             }
             
@@ -1212,9 +1226,7 @@ originalContentsURL:(NSURL *)originalContentsURL
 {
     // Before the user chooses where to place a new document, it has an autosaved URL only
     // On 10.6-, autosaves save newer versions of the document *separate* from the original doc
-    NSURL *result = self.autosavedContentsFileURL;
-    if (!result) result = self.fileURL;
-    return result;
+    return self.autosavedContentsFileURL ?: self.fileURL;
 }
 
 /*
