@@ -151,8 +151,6 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
         [self performSynchronousFileAccessUsingBlock:^{ }];
     }
 
-    // It is an error to return the viewContext if the persistent stores haven't been loaded,
-    // so use the _container ivar instead of trying to instantiate it via the property.
     return container.viewContext;
 }
 
