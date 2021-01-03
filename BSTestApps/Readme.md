@@ -1,7 +1,8 @@
 # BSTestApps
 
-Simple workspace with two projects, ARC and non-ARC that just loads
-BSManagedDocument.
+Simple workspace with one projects that just loads BSManagedDocument. ARC and
+non-ARC targets are provided (the ARC version just flips on -fobjc-arc when
+compiling BSManagedDocument.m).
 
 This serves two purposes:
 
