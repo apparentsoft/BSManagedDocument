@@ -205,7 +205,7 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
         [error retain];
 #endif
         if (!error)
-            [container.viewContext performBlockAndWait:setUndoManagerBlock];
+            [container.viewContext performBlock:setUndoManagerBlock];
     }];
     return (error == nil);
 }
@@ -1140,6 +1140,30 @@ originalContentsURL:(NSURL *)originalContentsURL
     }
 }
 
+- (void)performBlockAndWaitOnViewContext:(void(^)(NSManagedObjectContext *))block {
+    NSManagedObjectContext *savingContext = self.managedObjectContext;
+
+    // The returned context (the container's .viewContext) needs access to the main thread to do its work.
+    // If we're on the main thread, go ahead and do it. If not, we may need to break out of the main thread's
+    // performSynchronousFileAccessUsingBlock: (e.g. the fakeSynchronousAutosave method invoked by File > Duplicate).
+    // continueAsynchronousWorkOnMainThreadUsingBlock: lets us slip in some work on the main thread, but it
+    // returns immediately, so use a semaphore to ensure the save is complete before this function returns.
+    if (NSThread.isMainThread) {
+        [savingContext performBlockAndWait:^{
+            block(savingContext);
+        }];
+    } else {
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        [self continueAsynchronousWorkOnMainThreadUsingBlock:^{
+            [savingContext performBlockAndWait:^{
+                block(savingContext);
+            }];
+            dispatch_semaphore_signal(semaphore);
+        }];
+        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    }
+}
+
 - (BOOL)writeStoreContentToURL:(NSURL *)storeURL error:(NSError **)error;
 {
     // First update metadata
@@ -1163,11 +1187,9 @@ originalContentsURL:(NSURL *)originalContentsURL
         return NO;
     }
     
-    // On 10.12+ we can save on the viewContext, no private queue needed
-    NSManagedObjectContext *savingContext = self.managedObjectContext;
-
-    [savingContext performBlockAndWait:^{
-        result = [savingContext save:error];
+    // On 10.12+ saving on the viewContext goes directly to disk. There is no parentContext.
+    [self performBlockAndWaitOnViewContext:^(NSManagedObjectContext *ctx) {
+        result = [ctx save:error];
             
 #if ! __has_feature(objc_arc)
         // Errors need special handling to guarantee surviving crossing the block. http://www.mikeabdullah.net/cross-thread-error-passing.html
