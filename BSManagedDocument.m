@@ -205,7 +205,7 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
         [error retain];
 #endif
         if (!error)
-            [container.viewContext performBlockAndWait:setUndoManagerBlock];
+            [container.viewContext performBlock:setUndoManagerBlock];
     }];
     return (error == nil);
 }
@@ -1141,6 +1141,30 @@ originalContentsURL:(NSURL *)originalContentsURL
     }
 }
 
+- (void)performBlockAndWaitOnViewContext:(void(^)(NSManagedObjectContext *))block {
+    NSManagedObjectContext *savingContext = self.managedObjectContext;
+
+    // The returned context (the container's .viewContext) needs access to the main thread to do its work.
+    // If we're on the main thread, go ahead and do it. If not, we may need to break out of the main thread's
+    // performSynchronousFileAccessUsingBlock: (e.g. the fakeSynchronousAutosave method invoked by File > Duplicate).
+    // continueAsynchronousWorkOnMainThreadUsingBlock: lets us slip in some work on the main thread, but it
+    // returns immediately, so use a semaphore to ensure the save is complete before this function returns.
+    if (NSThread.isMainThread) {
+        [savingContext performBlockAndWait:^{
+            block(savingContext);
+        }];
+    } else {
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        [self continueAsynchronousWorkOnMainThreadUsingBlock:^{
+            [savingContext performBlockAndWait:^{
+                block(savingContext);
+            }];
+            dispatch_semaphore_signal(semaphore);
+        }];
+        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    }
+}
+
 - (BOOL)writeStoreContentToURL:(NSURL *)storeURL error:(NSError **)error;
 {
     // First update metadata
@@ -1164,11 +1188,9 @@ originalContentsURL:(NSURL *)originalContentsURL
         return NO;
     }
     
-    // On 10.12+ we can save on the viewContext, no private queue needed
-    NSManagedObjectContext *savingContext = self.managedObjectContext;
-
-    [savingContext performBlockAndWait:^{
-        result = [savingContext save:error];
+    // On 10.12+ saving on the viewContext goes directly to disk. There is no parentContext.
+    [self performBlockAndWaitOnViewContext:^(NSManagedObjectContext *ctx) {
+        result = [ctx save:error];
             
 #if ! __has_feature(objc_arc)
         // Errors need special handling to guarantee surviving crossing the block. http://www.mikeabdullah.net/cross-thread-error-passing.html
@@ -1190,7 +1212,27 @@ originalContentsURL:(NSURL *)originalContentsURL
 
 - (BOOL)canAsynchronouslyWriteToURL:(NSURL *)url ofType:(NSString *)typeName forSaveOperation:(NSSaveOperationType)saveOperation;
 {
-    return [NSDocument instancesRespondToSelector:_cmd];    // opt in on 10.7+
+    // In order to provide immediate access to an NSManagedObjectContext from the main thread, we need
+    // to force an autosave so that the NSPersistentContainer has a backing store, without which attempts
+    // to save will fail. If asynchronous saving is enabled, the save itself will occur on a background
+    // thread – but the container's viewContext needs access to the main thread in order to save, resulting
+    // in a deadlock, since the main thread is still waiting for the initial autosave to complete. To prevent the
+    // deadlock, disable asynchronous writing (below) until the container has a backing store.
+    
+    // Since the viewContext uses the main queue, it's not clear how much benefit is provided by asynchronous
+    // saving anyway, as the background thread will just block while waiting for the main thread to perform its save.
+    // There will still be benefits for document subclasses that store "additional content" in the document package,
+    // see the addtionalContent* methods of this class. I believe that as long as BSManagedDocument is providing subclasses
+    // with access to the container's viewContext, then it is the viewContext that will have to be saved, and thus
+    // we'll always need main thread access for saving even with "asynchronous" writing turned on. It's possible that
+    // we could re-architect things to provide access to a background context instead, but client applications will (in
+    // my understanding) to have wrap all of their model interactions in performBlocks for the marginal benefit of enabling
+    // fully aysnchronous writing.
+    
+    // So: Enable async writing by default (after the initial write has occurred), but note that it may still end up blocking
+    // the main UI thread. I personally prefer to turn off async entirely (by overriding this method to return NO) as async
+    // writing has been the source of a number of subtle race conditions in the past. -EMM 2021-01-02
+    return self.isCoordinatorConfigured;
 }
 
 - (void)setFileURL:(NSURL *)absoluteURL
@@ -1218,9 +1260,9 @@ originalContentsURL:(NSURL *)originalContentsURL
 
 #pragma mark Autosave
 
-/*  Enable autosave-in-place and versions browser on 10.7+
+/*  Enable autosave-in-place and versions browser, override if you don't want them
  */
-+ (BOOL)autosavesInPlace { return [NSDocument respondsToSelector:_cmd]; }
++ (BOOL)autosavesInPlace { return YES; }
 + (BOOL)preservesVersions { return self.autosavesInPlace; }
 
 - (void)setAutosavedContentsFileURL:(NSURL *)absoluteURL;
@@ -1235,7 +1277,6 @@ originalContentsURL:(NSURL *)originalContentsURL
 - (NSURL *)mostRecentlySavedFileURL;
 {
     // Before the user chooses where to place a new document, it has an autosaved URL only
-    // On 10.6-, autosaves save newer versions of the document *separate* from the original doc
     return self.autosavedContentsFileURL ?: self.fileURL;
 }
 

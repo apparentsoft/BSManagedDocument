@@ -33,13 +33,10 @@
     // Add any code here that needs to be executed once the windowController has loaded the document's window.
 }
 
-- (BOOL)configurePersistentStoreCoordinatorForURL:(NSURL *)storeURL ofType:(NSString *)fileType modelConfiguration:(NSString *)configuration storeOptions:(NSDictionary *)storeOptions error:(NSError **)error;
-{
-    NSMutableDictionary *options = [NSMutableDictionary dictionaryWithDictionary:storeOptions];
-    [options setObject:@YES forKey:NSMigratePersistentStoresAutomaticallyOption];
-    [options setObject:@YES forKey:NSInferMappingModelAutomaticallyOption];
-    
-    return [super configurePersistentStoreCoordinatorForURL:storeURL ofType:fileType modelConfiguration:configuration storeOptions:options error:error];
+- (BOOL)configurePersistentStoreCoordinatorWithDescription:(NSPersistentStoreDescription *)description error:(NSError **)outError {
+    description.shouldInferMappingModelAutomatically = YES;
+    description.shouldMigrateStoreAutomatically = YES;
+    return [super configurePersistentStoreCoordinatorWithDescription:description error:outError];
 }
 
 @end
