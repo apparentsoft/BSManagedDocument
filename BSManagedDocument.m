@@ -682,7 +682,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         // Restore persistent store URL after Save To-type operations. Even if save failed (just to be on the safe side)
         if (saveOperation == NSSaveToOperation)
         {
-            if (![welf.coordinator setURL:originalContentsURL forPersistentStore:welf.store])
+            if (![welf setURLForPersistentStoreUsingStoreURL:originalContentsURL])
             {
                 NSLog(@"Failed to reset store URL after Save To Operation");
             }
