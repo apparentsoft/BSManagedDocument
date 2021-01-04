@@ -358,10 +358,11 @@ operation is completed.
         return YES;
     
     NSPersistentStoreCoordinator *coordinator = self.coordinator;
+    NSPersistentStore *store = self.store;
     
     // (10.10 and later)
     [coordinator performBlockAndWait:^{
-        result = [coordinator removePersistentStore:self.store error:&error];
+        result = [coordinator removePersistentStore:store error:&error];
 #if !__has_feature(objc_arc)
         [error retain];
 #endif
@@ -1179,7 +1180,7 @@ originalContentsURL:(NSURL *)originalContentsURL
         return NO;
     
     // Ensure store is writeable and saving to right location
-    if (!writable.boolValue || ![self.coordinator setURL:storeURL forPersistentStore:self.store]) {
+    if (!writable.boolValue || ![self setURLForPersistentStoreUsingStoreURL:storeURL]) {
         if (error) {
             // Generic error. Doc/error system takes care of supplying a nice generic message to go with it
             *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteNoPermissionError userInfo:nil];
@@ -1246,15 +1247,28 @@ originalContentsURL:(NSURL *)originalContentsURL
     [super setFileURL:absoluteURL];
 }
 
+- (BOOL)setURLForPersistentStoreUsingStoreURL:(NSURL *)storeURL {
+    if (!self.isCoordinatorConfigured) return NO;
+
+    NSPersistentStoreCoordinator *coordinator = self.coordinator;
+    NSPersistentStore *store = self.store;
+    
+    __block BOOL result = NO;
+    [coordinator performBlockAndWait:^{
+        result = [coordinator setURL:storeURL forPersistentStore:store];
+    }];
+    return result;
+}
+
 - (void)setURLForPersistentStoreUsingFileURL:(NSURL *)absoluteURL;
 {
     if (!self.isCoordinatorConfigured) return;
     
     NSURL *storeURL = [[self class] persistentStoreURLForDocumentURL:absoluteURL];
     
-    if (![self.coordinator setURL:storeURL forPersistentStore:self.store])
+    if (![self setURLForPersistentStoreUsingStoreURL:storeURL])
     {
-        NSLog(@"Unable to set store URL");
+        NSLog(@"Unable to set store URL: %@", storeURL);
     }
 }
 
