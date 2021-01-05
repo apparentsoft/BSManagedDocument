@@ -1073,22 +1073,14 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 - (BOOL)writeBackupToURL:(NSURL *)backupURL error:(NSError **)outError;
 {
     NSURL *source = self.mostRecentlySavedFileURL;
-
-    BOOL ok;
     /* In case the user inadvertently clicks File > Duplicate on a new
      document which has not been saved yet, source will be nil, so
      we check for that to avoid a subsequent NSFileManager exception. */
-	if (source)
-    {
-        /* The following also copies any additional content in the package. */
-        ok = [NSFileManager.defaultManager copyItemAtURL:source toURL:backupURL error:outError];
-    }
-    else
-    {
-        ok = YES;
-    }
+    if (!source)
+        return YES;
 
-    return ok;
+    /* The following also copies any additional content in the package. */
+    return [NSFileManager.defaultManager copyItemAtURL:source toURL:backupURL error:outError];
 }
 
 - (BOOL)writeToURL:(NSURL *)inURL
