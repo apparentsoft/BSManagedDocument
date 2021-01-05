@@ -358,10 +358,11 @@ operation is completed.
         return YES;
     
     NSPersistentStoreCoordinator *coordinator = self.coordinator;
+    NSPersistentStore *store = self.store;
     
     // (10.10 and later)
     [coordinator performBlockAndWait:^{
-        result = [coordinator removePersistentStore:self.store error:&error];
+        result = [coordinator removePersistentStore:store error:&error];
 #if !__has_feature(objc_arc)
         [error retain];
 #endif
@@ -681,7 +682,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         // Restore persistent store URL after Save To-type operations. Even if save failed (just to be on the safe side)
         if (saveOperation == NSSaveToOperation)
         {
-            if (![welf.coordinator setURL:originalContentsURL forPersistentStore:welf.store])
+            if (![welf setURLForPersistentStoreUsingStoreURL:originalContentsURL])
             {
                 NSLog(@"Failed to reset store URL after Save To Operation");
             }
@@ -1081,14 +1082,15 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 
 - (BOOL)writeBackupToURL:(NSURL *)backupURL error:(NSError **)outError;
 {
+    NSURL *source = self.mostRecentlySavedFileURL;
     /* In case the user inadvertently clicks File > Duplicate on a new
      document which has not been saved yet, source will be nil, so
      we check for that to avoid a subsequent NSFileManager exception. */
-    if (!self.mostRecentlySavedFileURL)
+    if (!source)
         return YES;
-    
-    return [NSFileManager.defaultManager copyItemAtURL:self.mostRecentlySavedFileURL
-                                                 toURL:backupURL error:outError];
+
+    /* The following also copies any additional content in the package. */
+    return [NSFileManager.defaultManager copyItemAtURL:source toURL:backupURL error:outError];
 }
 
 - (BOOL)writeToURL:(NSURL *)inURL
@@ -1162,6 +1164,7 @@ originalContentsURL:(NSURL *)originalContentsURL
             dispatch_semaphore_signal(semaphore);
         }];
         dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+        dispatch_release(semaphore);
     }
 }
 
@@ -1179,7 +1182,7 @@ originalContentsURL:(NSURL *)originalContentsURL
         return NO;
     
     // Ensure store is writeable and saving to right location
-    if (!writable.boolValue || ![self.coordinator setURL:storeURL forPersistentStore:self.store]) {
+    if (!writable.boolValue || ![self setURLForPersistentStoreUsingStoreURL:storeURL]) {
         if (error) {
             // Generic error. Doc/error system takes care of supplying a nice generic message to go with it
             *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteNoPermissionError userInfo:nil];
@@ -1246,15 +1249,28 @@ originalContentsURL:(NSURL *)originalContentsURL
     [super setFileURL:absoluteURL];
 }
 
+- (BOOL)setURLForPersistentStoreUsingStoreURL:(NSURL *)storeURL {
+    if (!self.isCoordinatorConfigured) return NO;
+
+    NSPersistentStoreCoordinator *coordinator = self.coordinator;
+    NSPersistentStore *store = self.store;
+    
+    __block BOOL result = NO;
+    [coordinator performBlockAndWait:^{
+        result = [coordinator setURL:storeURL forPersistentStore:store];
+    }];
+    return result;
+}
+
 - (void)setURLForPersistentStoreUsingFileURL:(NSURL *)absoluteURL;
 {
     if (!self.isCoordinatorConfigured) return;
     
     NSURL *storeURL = [[self class] persistentStoreURLForDocumentURL:absoluteURL];
     
-    if (![self.coordinator setURL:storeURL forPersistentStore:self.store])
+    if (![self setURLForPersistentStoreUsingStoreURL:storeURL])
     {
-        NSLog(@"Unable to set store URL");
+        NSLog(@"Unable to set store URL: %@", storeURL);
     }
 }
 
