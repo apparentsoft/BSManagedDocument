@@ -520,101 +520,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
                 return NO;
             }
         }
-        else
-        {
-            if (welf.class.autosavesInPlace)
-            {
-                if (saveOperation == NSAutosaveElsewhereOperation)
-                {
-                    // Special-case autosave-elsewhere for 10.7+ documents that have been saved
-                    // e.g. reverting a doc that has unautosaved changes
-                    // The system asks us to autosave it to some temp location before closing
-                    // CAN'T save-in-place to achieve that, since the doc system is expecting us to leave the original doc untouched, ready to load up as the "reverted" version
-                    // But the doc system also asks to do this when performing a Save As operation, and choosing to discard unsaved edits to the existing doc. In which case the SQLite store moves out underneath us and we blow up shortly after
-                    // Doc system apparently considers it fine to fail at this, since it passes in NULL as the error pointer
-                    // With great sadness and wretchedness, that's the best workaround I have for the moment
-                    NSURL *fileURL = welf.fileURL;
-                    if (fileURL)
-                    {
-                        NSURL *autosaveURL = welf.autosavedContentsFileURL;
-                        if (!autosaveURL)
-                        {
-                            // Make a copy of the existing doc to a location we control first
-                            NSURL *autosaveTempDirectory = [NSFileManager.defaultManager URLForDirectory:NSItemReplacementDirectory
-                                                                                                  inDomain:NSUserDomainMask
-                                                                                         appropriateForURL:fileURL
-                                                                                                    create:YES
-                                                                                                     error:error];
-                            if (!autosaveTempDirectory) {
-                                [welf spliceErrorWithCode:478210
-                                     localizedDescription:@"Failed getting IRD"
-                                            likelyCulprit:fileURL
-                                             intoOutError:error];
-                                [welf signalDoneAndMaybeClose];
-                                return NO;
-                            }
-                            welf.autosavedContentsTempDirectoryURL = autosaveTempDirectory;
-                            
-                            autosaveURL = [autosaveTempDirectory URLByAppendingPathComponent:fileURL.lastPathComponent];
-                            if (![welf writeBackupToURL:autosaveURL error:error])
-                            {
-                                [welf spliceErrorWithCode:478211
-                                     localizedDescription:@"Failed writing to backup URL"
-                                            likelyCulprit:autosaveURL
-                                             intoOutError:error];
-                                [welf signalDoneAndMaybeClose];
-                                return NO;
-                            }
-                            
-                            welf.autosavedContentsFileURL = autosaveURL;
-                        }
-                        
-                        // Bring the autosaved doc up-to-date
-                        NSURL* storeURL = [welf.class persistentStoreURLForDocumentURL:autosaveURL];
-                        result = [welf writeStoreContentToURL:storeURL
-                                                        error:error];
-                        if (!result)
-                        {
-                            [welf spliceErrorWithCode:478212
-                                 localizedDescription:@"Failed writing store content"
-                                        likelyCulprit:storeURL
-                                         intoOutError:error];
-                            [welf signalDoneAndMaybeClose];
-                            return NO;
-                        }
-
-                        result = [welf writeAdditionalContent:additionalContent
-                                                        toURL:autosaveURL
-                                          originalContentsURL:originalContentsURL
-                                                        error:error];
-                        if (!result)
-                        {
-                            [welf spliceErrorWithCode:478213
-                                 localizedDescription:@"Failed writing additional content"
-                                        likelyCulprit:autosaveURL
-                                         intoOutError:error];
-                            [welf signalDoneAndMaybeClose];
-                            return NO;
-                        }
-                        
-                        
-                        // Then copy that across to the final URL
-                        result = [self writeBackupToURL:url error:error];
-                        if (!result)
-                        {
-                            [welf spliceErrorWithCode:478214
-                                 localizedDescription:@"Failed copying to final URL"
-                                        likelyCulprit:url
-                                         intoOutError:error];
-                            [welf signalDoneAndMaybeClose];
-                            return NO;
-                        }
-                    }
-                }
-            }
-            else
-            {
-                if (saveOperation != NSSaveOperation && saveOperation != NSAutosaveInPlaceOperation)
+        else if (saveOperation != NSSaveOperation && saveOperation != NSAutosaveInPlaceOperation)
                 {
                     if (![storeURL checkResourceIsReachableAndReturnError:NULL])
                     {
@@ -646,8 +552,6 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
                         }
                     }
                 }
-            }
-        }
         
         // Right, let's get on with it!
         if (![welf writeStoreContentToURL:storeURL error:error])
@@ -986,10 +890,14 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 					}
 				}
             } else if (saveOperation == NSAutosaveElsewhereOperation) {
+                // "Autosave Elsewhere" is abused by NSDocument for all kinds of things
                 if (!self.mostRecentlySavedFileURL) {
                     // If an autosave is forced early on in the document life cycle, the autosavedContentsFileURL
                     // might not be set. Go ahead and set it here so that NSDocument won't attempt to give the
                     // document a second autosave URL.
+                    self.autosavedContentsFileURL = absoluteURL;
+                } else if (!self.autosavedContentsFileURL && self.hasUnautosavedChanges) {
+                    // This looks like NSDocument is trying to preserve a document version prior to a Revert.
                     self.autosavedContentsFileURL = absoluteURL;
                 } else if (![absoluteURL isEqual:self.autosavedContentsFileURL]) {
                     // We're supposed to blast a copy out somewhere else e.g.:
@@ -1412,7 +1320,7 @@ originalContentsURL:(NSURL *)originalContentsURL
     Block_release(contextInfo);
 }
 
-#pragma mark Duplicating Documents
+#pragma mark Duplicating and Sharing Documents
 
 - (NSDocument *)duplicateAndReturnError:(NSError **)outError;
 {
