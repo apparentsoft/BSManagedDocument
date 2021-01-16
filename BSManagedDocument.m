@@ -360,7 +360,6 @@ operation is completed.
     NSPersistentStoreCoordinator *coordinator = self.coordinator;
     NSPersistentStore *store = self.store;
     
-    // (10.10 and later)
     [coordinator performBlockAndWait:^{
         result = [coordinator removePersistentStore:store error:&error];
 #if !__has_feature(objc_arc)
@@ -429,12 +428,6 @@ operation is completed.
     
     return result;
 }
-
-/* The following two methods are necessary because in one of the methods below
-we use a weak self (`welf`) when compiling with ARC.  We should make these two
- methods properties and replace all of the remaining direct instance variable
- accesses.  They scare me.
- */
 
 - (NSPersistentStoreCoordinator*)coordinator {
     return self.persistentContainer.persistentStoreCoordinator;

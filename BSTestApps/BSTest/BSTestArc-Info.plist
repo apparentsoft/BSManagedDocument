@@ -9,7 +9,7 @@
 		<dict>
 			<key>CFBundleTypeExtensions</key>
 			<array>
-				<string>bstest_arc</string>
+				<string>bstest</string>
 			</array>
 			<key>CFBundleTypeIconFile</key>
 			<string></string>
