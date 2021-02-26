@@ -439,7 +439,22 @@ operation is completed.
     NSError *error = nil;
     if (![self removePersistentStoreWithError:&error])
         NSLog(@"Unable to remove persistent store before closing: %@", error);
-    [super close];
+    
+    /* We do a main thread dance here because, if asynchronous saving is
+     enabled, super -[NSDocument close] will usually close a document window,
+     which will probably send -windowWillClose to a window controller, which
+     may need to clean up some stuff in the user interface that probably needs
+     to be done on the main thread.  At least, it does in my (Jerry) apps.  */
+    if (NSThread.isMainThread)
+    {
+        [super close];
+    }
+    else
+    {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            [super close];
+        });
+    }
     [self deleteAutosavedContentsTempDirectory];
 }
 
