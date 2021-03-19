@@ -1413,7 +1413,7 @@ originalContentsURL:(NSURL *)originalContentsURL
     
     // Kick off an autosave
     __block BOOL result = YES;
-    [self autosaveWithImplicitCancellability:NO completionHandler:^(NSError *errorOrNil) {
+    [super autosaveWithImplicitCancellability:NO completionHandler:^(NSError *errorOrNil) {
         if (errorOrNil)
         {
             result = NO;
