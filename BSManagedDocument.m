@@ -175,7 +175,7 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
                                                      error:(NSError **)error_p {
     __block NSError *error = nil;
     NSPersistentContainer *container = self.persistentContainer;
-    void (^setUndoManagerBlock)(void) = ^{
+    void (^setUndoManagerBlock)(NSManagedObjectContext *) = ^(NSManagedObjectContext *context){
         /* In macOS 10.11 and earler, the newly-initialized `context`
          typically found at this point will have a NSUndoManager.  But in
          macOS 10.12 and later, surprise, it will have nil undo manager.
@@ -188,12 +188,12 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
             /* This branch will always execute, *except* when +undoManagerClass is
              overridden to return nil. */
             NSUndoManager *undoManager = [[self.class.undoManagerClass alloc] init];
-            container.viewContext.undoManager = undoManager;
+            context.undoManager = undoManager;
 #if !__has_feature(objc_arc)
             [undoManager release];
 #endif
         }
-        self.undoManager = container.viewContext.undoManager;
+        self.undoManager = context.undoManager;
     };
 
     description.shouldAddStoreAsynchronously = NO;
@@ -205,7 +205,7 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
         [error retain];
 #endif
         if (!error)
-            [container.viewContext performBlock:setUndoManagerBlock];
+            [self performBlockAndWaitOnViewContext:setUndoManagerBlock];
     }];
     return (error == nil);
 }
