@@ -144,7 +144,7 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
         // The easiest way to do that without requiring changes to subclasses is to force
         // a synchronous autosave before returning the context for the first time.
         [self updateChangeCount:NSChangeDone];
-        [self autosaveWithImplicitCancellability:YES
+        [super autosaveWithImplicitCancellability:YES
                                completionHandler:^(NSError *errorOrNil) {
                                    [self updateChangeCount:NSChangeCleared];
                                }];
