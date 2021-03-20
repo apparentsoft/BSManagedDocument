@@ -650,14 +650,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
     // __weak was meaningless in non-ARC; generates a compiler warning
     BSManagedDocument* welf = self;
 #endif
-#if DEBUG
-        NSLog(@"1 welf is %@", welf) ;
-#endif
-
     self.writingBlock = ^(NSURL *url, NSSaveOperationType saveOperation, NSURL *originalContentsURL, NSError **error) {
-#if DEBUG
-        NSLog(@"2 welf is %@", welf) ;
-#endif
 
         // For the first save of a document, create the folders on disk before we do anything else
         // Then setup persistent store appropriately
@@ -666,9 +659,6 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         
         if (![welf store])
         {
-#if DEBUG
-            NSLog(@"3 welf is %@", welf) ;
-#endif
             result = [welf createPackageDirectoriesAtURL:url
                                                   ofType:typeName
                                         forSaveOperation:saveOperation
@@ -699,9 +689,6 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         }
         else if (saveOperation == NSSaveAsOperation)
         {
-#if DEBUG
-            NSLog(@"4 welf is %@", welf) ;
-#endif
             // Copy the whole package to the new location, not just the store content
             if (![welf writeBackupToURL:url error:error])
             {
@@ -715,10 +702,6 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         }
         else
         {
-#if DEBUG
-        NSLog(@"5 welf is %@", welf) ;
-#endif
-
             if (welf.class.autosavesInPlace)
             {
                 if (saveOperation == NSAutosaveElsewhereOperation)
@@ -849,9 +832,6 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 #if !__has_feature(objc_arc)
         [welf retain];
 #endif
-#if DEBUG
-        NSLog(@"6 welf is %@", welf) ;
-#endif
         // Right, let's get on with it!
         if (![welf writeStoreContentToURL:storeURL error:error])
         {
@@ -862,9 +842,6 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
             return NO;
         }
         
-#if DEBUG
-        NSLog(@"7 welf is %@", welf) ;
-#endif
         /* 2020-May-17  Damn.  Still seeing crashes here
          once a week or so when running in Xcode debugger in non-ARC, possibly
          after letting a dialog sit without responding for several minutes,
