@@ -31,7 +31,11 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
 @property(atomic, assign) BOOL isSaving;
 @property(atomic, assign) BOOL shouldCloseWhenDoneSaving;
 @property (atomic, copy) BOOL (^writingBlock)(NSURL*, NSSaveOperationType, NSURL*, NSError**);
-
+@property (nonatomic, readonly) NSPersistentContainer *persistentContainer;
+@property (nonatomic, readonly) NSPersistentStoreCoordinator *coordinator;
+@property (nonatomic, readonly) NSPersistentStore *store;
+@property (nonatomic, readonly, getter=isCoordinatorConfigured) BOOL coordinatorConfigured;
+@property (readonly, copy) NSURL *mostRecentlySavedFileURL;
 
 @end
 
@@ -114,81 +118,43 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
     return fileURL;
 }
 
+- (BOOL)isCoordinatorConfigured {
+    return _container.persistentStoreCoordinator.persistentStores.count > 0;
+}
+
+- (NSPersistentContainer *)persistentContainer {
+    if (!_container) {
+        _container = [[NSPersistentContainer alloc] initWithName:[[self class] persistentStoreName]
+                                              managedObjectModel:[self managedObjectModel]];
+    }
+    return _container;
+}
+
 - (NSManagedObjectContext *)managedObjectContext;
 {
-    if (!_managedObjectContext)
-    {
-        // Need 10.7+ to support concurrency types
-        NSManagedObjectContext *context = [[self.class.managedObjectContextClass alloc] initWithConcurrencyType:NSMainQueueConcurrencyType];
-        [self setManagedObjectContext:context];
-#if ! __has_feature(objc_arc)
-        [context release];
-#endif
-    }
+    NSPersistentContainer *container = self.persistentContainer;
     
-    return _managedObjectContext;
+    if (!self.isCoordinatorConfigured) {
+        // The viewContext returned by an unconfigured container can't be saved.
+        // In previous implementations / forks, an unsaved document would be backed
+        // by an unaffiliated managedObjectContext, which could be "saved" without
+        // disk backing, and which could be associated with a persistent store later.
+        // This kind of "late binding" isn't allowed under the NSPersistentContainer regime,
+        // and so we need the persistent store to be configured before accessing the context.
+        // The easiest way to do that without requiring changes to subclasses is to force
+        // a synchronous autosave before returning the context for the first time.
+        [self updateChangeCount:NSChangeDone];
+        [super autosaveWithImplicitCancellability:YES
+                               completionHandler:^(NSError *errorOrNil) {
+                                   [self updateChangeCount:NSChangeCleared];
+                               }];
+        [self performSynchronousFileAccessUsingBlock:^{ }];
+    }
+
+    return container.viewContext;
 }
 
-- (void)setManagedObjectContext:(NSManagedObjectContext *)context;
-{
-    // Setup the rest of the stack for the context
-    if (!_coordinator)
-        _coordinator = [[NSPersistentStoreCoordinator alloc] initWithManagedObjectModel:self.managedObjectModel];
-    
-    if (self.hasUndoManager)
-    {
-        [NSNotificationCenter.defaultCenter removeObserver:self name:nil object:self.undoManager];
-        self.undoManager = nil;
-    }
-    
-    void (^setUndoManagerBlock)(void) = ^{
-        /* In macOS 10.11 and earler, the newly-initialized `context`
-         typically found at this point will have a NSUndoManager.  But in
-         macOS 10.12 and later, surprise, it will have nil undo manager.
-         https://github.com/karelia/BSManagedDocument/issues/47
-         https://github.com/karelia/BSManagedDocument/issues/50
-         In either case, this may be not what the developer has specified
-         in overriding +undoManagerClass.  So we test… */
-        if (context.undoManager.class != self.class.undoManagerClass)
-        {
-            /* This branch will always execute, *except* in two *edge* cases:
-             * Edge Case 1: macOS 10.11 or earlier, and +undoManagerClass is
-             overridden to return NSUndoManager, or not overridden.
-             * Edge Case 2: macOS 10.12 or later, and +undoManagerClass is
-             overridden to return nil. */
-            NSUndoManager *undoManager = [[self.class.undoManagerClass alloc] init];
-            context.undoManager = undoManager;  // may rightfully be nil
-#if !__has_feature(objc_arc)
-            [undoManager release];
-#endif
-        }
-        self.undoManager = context.undoManager;
-    };
-
-    [context performBlockAndWait:setUndoManagerBlock];
-         
-    NSManagedObjectContext *parentContext = [[self.class.managedObjectContextClass alloc] initWithConcurrencyType:NSPrivateQueueConcurrencyType];
-    parentContext.undoManager = nil; // no point in it supporting undo
-    parentContext.persistentStoreCoordinator = _coordinator;
-        
-    context.parentContext = parentContext;
-
-#if !__has_feature(objc_arc)
-    [parentContext release];
-#endif
-
-#if __has_feature(objc_arc)
-    _managedObjectContext = context;
-#else
-    [context retain];
-    [_managedObjectContext release]; _managedObjectContext = context;
-#endif
-
-    // See note JK20170624 at end of file
-}
-
-// Allow subclasses to have custom managed object contexts or undo managers
-+ (Class)managedObjectContextClass; { return [NSManagedObjectContext class]; }
+// Allow subclasses to have custom undo managers. Return nil for no manager
 + (Class)undoManagerClass; {return [NSUndoManager class]; }
 
 - (NSManagedObjectModel *)managedObjectModel;
@@ -205,132 +171,57 @@ NSString* BSManagedDocumentErrorDomain = @"BSManagedDocumentErrorDomain" ;
     return _managedObjectModel;
 }
 
+- (BOOL)configurePersistentStoreCoordinatorWithDescription:(NSPersistentStoreDescription *)description
+                                                     error:(NSError **)error_p {
+    __block NSError *error = nil;
+    NSPersistentContainer *container = self.persistentContainer;
+    void (^setUndoManagerBlock)(NSManagedObjectContext *) = ^(NSManagedObjectContext *context){
+        /* In macOS 10.11 and earler, the newly-initialized `context`
+         typically found at this point will have a NSUndoManager.  But in
+         macOS 10.12 and later, surprise, it will have nil undo manager.
+         https://github.com/karelia/BSManagedDocument/issues/47
+         https://github.com/karelia/BSManagedDocument/issues/50
+         In either case, this may be not what the developer has specified
+         in overriding +undoManagerClass.  So we test… */
+        if (self.class.undoManagerClass)
+        {
+            /* This branch will always execute, *except* when +undoManagerClass is
+             overridden to return nil. */
+            NSUndoManager *undoManager = [[self.class.undoManagerClass alloc] init];
+            context.undoManager = undoManager;
+#if !__has_feature(objc_arc)
+            [undoManager release];
+#endif
+        }
+        self.undoManager = context.undoManager;
+    };
+
+    description.shouldAddStoreAsynchronously = NO;
+    container.persistentStoreDescriptions = @[ description ];
+    [container loadPersistentStoresWithCompletionHandler:
+         ^(NSPersistentStoreDescription *addedDescription, NSError *addError) {
+        error = addError;
+#if ! __has_feature(objc_arc)
+        [error retain];
+#endif
+        if (!error)
+            [self performBlockAndWaitOnViewContext:setUndoManagerBlock];
+    }];
+    return (error == nil);
+}
+
 - (BOOL)configurePersistentStoreCoordinatorForURL:(NSURL *)storeURL
                                            ofType:(NSString *)fileType
                                modelConfiguration:(NSString *)configuration
                                      storeOptions:(NSDictionary<NSString *,id> *)storeOptions
                                             error:(NSError **)error_p
 {
-    /* I was getting a crash on launch, in OS X 10.11, when previously-opened
-     document was attempted to be reopened (for "state restoration") by
-     -[NSDocumentController reopenDocumentForURL:withContentsOfURL:display:completionHandler:],
-     if said document could not be migrated because it was of an unsupported
-     previous data model version.  (Yes, this is an edge edge case).
-     This happened in two different projects of mine, one ARC, one non-ARC.
-     The crashing seemed to be fixed after I introduced the following local
-     'error' variable to isolate it from the out NSError**.
-     Jerry Krinock 2016-Mar-14. */
-    NSError* __block error = nil ;
-    // Create a coordinator if necessary, but do not under any circumstances invoke
-    // [self managedObjectContext] inside this function. Creating the managedObjectContext
-    // requires access to the main thread (deep inside setParentContext:), but the main
-    // thread could be blocked by the Version Browser waiting for a reverted document to
-    // load, resulting in a deadlock. So we create the coordinator now and add it to
-    // the context later, when we know we have access to the main thread.
-    if (!_coordinator)
-    {
-        /* I don't know when this branch ever runs.  In all my testing,
-         _coordinator is created within -setManagedObjectContext:.
-         I have never seen this branch run. */
-        _coordinator = [[NSPersistentStoreCoordinator alloc] initWithManagedObjectModel:self.managedObjectModel];
-    }
-    
-    void (^addPersistentStoreBlock)(void) = ^{
-        _store = [_coordinator addPersistentStoreWithType:[self persistentStoreTypeForFileType:fileType]
-                                            configuration:configuration
-                                                      URL:storeURL
-                                                  options:storeOptions
-                                                    error:&error];
-#if ! __has_feature(objc_arc)
-        [_store retain];
-        [error retain];
-#endif
-    };
-    
-    // Adding a persistent store will post a notification. If your app already has an
-    // NSObjectController (or subclass) setup to the context, it will react to that notification,
-    // on the assumption it's posted on the main thread. That could do some very weird things, so
-    // let's make sure the notification is actually posted on the main thread.
-    // Also seems to fix the deadlock in https://github.com/karelia/BSManagedDocument/issues/36
-    
-    /* Comment by Jerry 2019-09-18:  Until today, the code below used
-     [_coordinator performBlockAndWait:] if available, which it is in macOS
-     10.10 or later.  That caused a problem in macOS 10.15 Beta 8,
-     after opting in to asynchronous saving.  I'm not sure which of these two
-     factors is responsible, but since I've already done a lot of testing with
-     opting in to asynchronous saving, I want to leave it on.
-     
-     The problem is that sometimes during an auto save, and always, after
-     creating a new adocument and saving it for the first time,
-     For some reason, when Core Data Concurency Debugging on, I get the famous
-     __Multithreading_Violation_AllThatIsLeftToUsIsHonor_ assertion whenver
-     a new document is first saved, and one time I saw it when autosaving an
-     already open document.  This assertion occurs inside the
-     addPersistentStoreBlock above, upon addPersistentStoreWithType:::::.
-     Of course, it does not make any sense that this could happen within a
-     performBlockAndWait: call, because that is the whole purpose of
-     performBlockAndWait:, to prevent these multithreading violations.
-     In this class, the psc and the parent moc can and usually do operate in
-     different non-main queues when you send -performBlock: or
-     -performBlockAndWait:).  I thought that might be the problem, so I tried
-     forcing the psc and the parent moc to operate in the same queue, by
-     creating the psc within a performBlockAndWait: sent to the parent moc.
-     (See debugging code below in this comment.)  It worked as intended,  but
-     had no effect on the problem.
-     
-     Of course it is possible that the multithreading assertion is a false
-     alarm, a bug in 10.15 Beta 8, but I do not want to assume that.
-     
-     The only way I found to fix the problem, implemented below, is to comment
-     out the code branch for macOS 10.10 and later, which uses
-     -[NSPersistentStoreCoordinator performBlockAndWait:], and instead execute
-     the branch for 10.7 - 10.9, which uses instead
-     -[NSManagedObjectContext performBlockAndWait:].  Because I need to ship
-     this now, I'm leaving it like that at this time.
-     
-     Maybe I shall revisit this after 10.15 is out of beta. Here is debugging
-     code one can use to log the operating queue of the psc and each of the two
-     mocs:
-     
-     __block NSObject* whatever = nil;
-     void (^logTheQueueBlock)(void) = ^void(void){
-         NSLog(@"Operating thread is %@ %p for %@", [NSThread isMainThread] ? @"main" : @"non-main", [NSThread currentThread], whatever) ;
-     };
-     whatever = _coordinator;
-     [_coordinator performBlockAndWait:logTheQueueBlock];
-     whatever = _managedObjectContext.parentContext;
-     [_managedObjectContext.parentContext performBlockAndWait:logTheQueueBlock];
-     whatever = _managedObjectContext;
-     [_managedObjectContext performBlockAndWait:logTheQueueBlock];
-     
-     Here is another line of debugging code which is handy:
-     
-     NSLog(@"1 Created moc %p with NSMainQueueConcurrencyType on %@ thread %p", context, [NSThread isMainThread] ? @"main" : @"secondary", [NSThread currentThread]) ;
-     
-     And now, the fix… */
-//    if ([_coordinator respondsToSelector:@selector(performBlockAndWait:)]) {
-//        // 10.10 and later
-//        [_coordinator performBlockAndWait:addPersistentStoreBlock];
-//    } else
-    if (_managedObjectContext) {
-        // On 10.7 - 10.9, use the context's performBlockAndWait: - BUT ONLY IF THE CONTEXT
-        // ALREADY EXISTS. Creating a context on this thread (which self.managedObjectContext
-        // will do) can result in a deadlock with the Version Browser.
-        [_managedObjectContext performBlockAndWait:addPersistentStoreBlock];
-    } else {
-        // If the context doesn't exist, then we don't worry about notifications
-        // posting on the wrong thread, so just do the work on this thread.
-        addPersistentStoreBlock();
-    }
-#if ! __has_feature(objc_arc)
-    [error autorelease];
-#endif
-    
-    if (error && error_p)
-    {
-        *error_p = error;
-    }
-    return (_store != nil);
+    NSPersistentStoreDescription *description = [NSPersistentStoreDescription persistentStoreDescriptionWithURL:storeURL];
+    [storeOptions enumerateKeysAndObjectsUsingBlock:^(NSString *storeKey, id storeVal, BOOL *stop) {
+        [description setOption:storeVal forKey:storeKey];
+    }];
+    description.configuration = configuration;
+    return [self configurePersistentStoreCoordinatorWithDescription:description error:error_p];
 }
 
 - (BOOL)configurePersistentStoreCoordinatorForURL:(NSURL *)storeURL
@@ -447,10 +338,8 @@ operation is completed.
 #if ! __has_feature(objc_arc)
 - (void)dealloc;
 {
-    [_managedObjectContext release];
     [_managedObjectModel release];
-    [_store release];
-    [_coordinator release];
+    [_container release];
     [_autosavedContentsTempDirectoryURL release];
     
     // _additionalContent is unretained so shouldn't be released here
@@ -465,51 +354,28 @@ operation is completed.
 - (BOOL)removePersistentStoreWithError:(NSError **)outError {
     __block BOOL result = YES;
     __block NSError * error = nil;
-    if (!_store)
+    if (!self.isCoordinatorConfigured)
         return YES;
     
-    void (^removePersistentStoreBlock)(void) = ^{
-        result = [_coordinator removePersistentStore:_store error:&error];
+    NSPersistentStoreCoordinator *coordinator = self.coordinator;
+    NSPersistentStore *store = self.store;
+    
+    [coordinator performBlockAndWait:^{
+        result = [coordinator removePersistentStore:store error:&error];
 #if !__has_feature(objc_arc)
         [error retain];
 #endif
-    };
+    }];
     
-    if ([_coordinator respondsToSelector:@selector(performBlockAndWait:)]) {
-        // (10.10 and later)
-        [_coordinator performBlockAndWait:removePersistentStoreBlock];
-    } else if (_managedObjectContext) {
-        // (10.7 - 10.9, and a context already exists)
-        // In my testing, HAVE to do the removal using parent's private queue.
-        // Otherwise, it deadlocks, trying to acquire a _PFLock
-        NSManagedObjectContext *context = _managedObjectContext;
-        while (context.parentContext) {
-            context = context.parentContext;
-        }
-        [context performBlockAndWait:removePersistentStoreBlock];
-    } else {
-        // If there's not an existing context, any thread should be fine
-        removePersistentStoreBlock();
-    }
 #if !__has_feature(objc_arc)
     [error autorelease];
 #endif
     
-    if (!result) {
-
-        if (outError) {
-            *outError = error;
-        }
-        return NO;
+    if (!result && outError) {
+        *outError = error;
     }
     
-#if !__has_feature(objc_arc)
-    [_store release];
-#endif
-    
-    _store = nil;
-    
-    return YES;
+    return result;
 }
 
 - (BOOL)readFromURL:(NSURL *)absoluteURL ofType:(NSString *)typeName error:(NSError **)outError
@@ -521,7 +387,7 @@ operation is completed.
     
     
     // If have already read, then this is a revert-type affair, so must reload data from disk
-    if (_store)
+    if (self.isCoordinatorConfigured)
     {
         if (!NSThread.isMainThread) {
             [NSException raise:NSInternalInconsistencyException format:@"%@: I didn't anticipate reverting on a background thread!", NSStringFromSelector(_cmd)];
@@ -563,18 +429,12 @@ operation is completed.
     return result;
 }
 
-/* The following two methods are necessary because in one of the methods below
-we use a weak self (`welf`) when compiling with ARC.  We should make these two
- methods properties and replace all of the remaining direct instance variable
- accesses.  They scare me.
- */
-
-- (NSPersistentStore*)store {
-    return _store;
+- (NSPersistentStoreCoordinator*)coordinator {
+    return self.persistentContainer.persistentStoreCoordinator;
 }
 
-- (NSPersistentStoreCoordinator*)coordinator {
-    return _coordinator;
+- (NSPersistentStore *)store {
+    return self.persistentContainer.persistentStoreCoordinator.persistentStores.firstObject;
 }
 
 #pragma mark Writing Document Data
@@ -596,39 +456,6 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         ok = NO;
     }
     
-    
-    // On 10.7+, save the main context, ready for parent to be saved in a moment
-    /* Jerry says: With Core Data thread checking on, I was getting the
-     familiar "All that is left to us is honor" exceptions here when my
-     document was saved, on 20180909.  I think this may have started when I
-     tried it with asynchronous saving ON for a time.  (That is, I changed my
-     subclass' override of -canAsynchronouslyWriteToURL:::: to return YES.)
-     Wrapping the call to -save: in -performBlockAndWait:, below, fixed it. */
-    NSError* __block blockError = nil;
-    NSManagedObjectContext *context = self.managedObjectContext;
-    [context performBlockAndWait:^{
-        ok = [context save:&blockError];
-#if !__has_feature(objc_arc)
-        [blockError retain];
-#endif
-    }];
-#if !__has_feature(objc_arc)
-    [blockError autorelease];
-#endif
-    if (outError && blockError) {
-        *outError = blockError;
-    }
-    if (!ok)
-    {
-        [self signalDoneAndMaybeClose];
-        if (outError && !*outError)
-        {
-            *outError = [NSError errorWithDomain:BSManagedDocumentErrorDomain
-                                            code:478221
-                                        userInfo:@{ NSLocalizedDescriptionKey : @"Unspecified error saving Core Data MOC" }];
-        }
-    }
-    
 #if __has_feature(objc_arc)
     __weak typeof(self) welf = self;
 #else
@@ -643,7 +470,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         BOOL result = YES;
         NSURL *storeURL = [welf.class persistentStoreURLForDocumentURL:url];
         
-        if (![welf store])
+        if (!welf.isCoordinatorConfigured)
         {
             result = [welf createPackageDirectoriesAtURL:url
                                                   ofType:typeName
@@ -848,7 +675,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         // Restore persistent store URL after Save To-type operations. Even if save failed (just to be on the safe side)
         if (saveOperation == NSSaveToOperation)
         {
-            if (![[welf coordinator] setURL:originalContentsURL forPersistentStore:[welf store]])
+            if (![welf setURLForPersistentStoreUsingStoreURL:originalContentsURL])
             {
                 NSLog(@"Failed to reset store URL after Save To Operation");
             }
@@ -923,7 +750,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
     //  * super is documented to use -performAsynchronousFileAccessUsingBlock: internally
     //  * Autosaving (as tested on 10.7) is declared to the system as *file access*, rather than an *activity*, so a regular save won't block the UI waiting for autosave to finish
     //  * If autosaving while quitting, calling -performActivity… here results in deadlock
-    [self performAsynchronousFileAccessUsingBlock:^(void (^fileAccessCompletionHandler)(void)) {  // Note StackPoint2
+    [self performAsynchronousFileAccessUsingBlock:^(void (^fileAccessCompletionHandler)(void)) {
 
         NSError* shouldAbortError = nil;
         
@@ -935,41 +762,12 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         } else {
             [self makeWritingBlockForURL:url ofType:typeName saveOperation:saveOperation error:&shouldAbortError];
 
-            BOOL notLoaded = [NSDocumentController.sharedDocumentController.documents indexOfObject:self] == NSNotFound;
-            if (notLoaded) {
-                NSLog(@"Warning 382-6734 Aborting save cuz not loaded: %@", self);
-                /* I have seen this occur if a document save is attempted during
-                 document opening, as for example if if document opening includes
-                 some kind of integrity check which fixes problems.  If such a
-                 too-early save is allowed tp proceed here, the call below to
-                 [super saveToURL:ofType:forSaveOperation:completionHandler:] will
-                 hang with the following stack:
-
-                 #0    0x00007fff7bdd3266 in semaphore_wait_trap ()
-                 #1    0x00007fff7bc51bd9 in _dispatch_sema4_wait ()
-                 #2    0x00007fff7bc523a0 in _dispatch_semaphore_wait_slow ()
-                 #3    0x00007fff5158b756 in -[NSFileCoordinator(NSPrivate) _blockOnAccessClaim:withAccessArbiter:] ()
-                 #4    0x00007fff517512f0 in -[NSFileCoordinator(NSPrivate) _coordinateReadingItemAtURL:options:writingItemAtURL:options:error:byAccessor:] ()
-                 #5    0x00007fff4d3873cc in -[NSDocument(NSDocumentSaving) _fileCoordinator:coordinateReadingContentsAndWritingItemAtURL:byAccessor:] ()
-                 #6    0x00007fff4d389098 in __85-[NSDocument(NSDocumentSaving) _saveToURL:ofType:forSaveOperation:completionHandler:]_block_invoke_2.810 ()
-                 #7    0x00007fff4d388844 in __85-[NSDocument(NSDocumentSaving) _saveToURL:ofType:forSaveOperation:completionHandler:]_block_invoke ()
-                 #8    0x00007fff4d3886c7 in -[NSDocument(NSDocumentSaving) _saveToURL:ofType:forSaveOperation:completionHandler:] ()
-                 #9    0x00000001062bd7c1 in __73-[BSManagedDocument saveToURL:ofType:forSaveOperation:completionHandler:]_block_invoke at // Note StackPoint1
-                 #10    0x00007fff4cea138d in -[NSDocument(NSDocumentSerializationAPIs) continueFileAccessUsingBlock:] ()
-                 #11    0x00007fff4cea1ab6 in -[NSDocument(NSDocumentSerializationAPIs) _performFileAccess:] ()
-                 #12    0x00000001062bd52d in -[BSManagedDocument saveToURL:ofType:forSaveOperation:completionHandler:] at // Note StackPoint2
-
-                 Looks like a file coordination deadlock.  I found that, duing such
-                 an attempted save, the document is oddly not in the document
-                 controller's documents yet; hence the condition `notLoaded`.
-                 */
-            }
             BOOL noWritingBlock = (self.writingBlock == nil);
             if (noWritingBlock) {
                 NSLog(@"Warning 382-6735 Aborting save cuz no writingBlock: %@", self);
             }
 
-            if (noWritingBlock || notLoaded)
+            if (noWritingBlock)
             {
                 // In either of these exceptional cases, abort the save.
 
@@ -1000,7 +798,7 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         }
         
         // Kick off async saving work
-        [super saveToURL:url ofType:typeName forSaveOperation:saveOperation completionHandler:^(NSError *error) {  // Note StackPoint1
+        [super saveToURL:url ofType:typeName forSaveOperation:saveOperation completionHandler:^(NSError *error) {
             
             // If the save failed, it might be an error the user can recover from.
 			// e.g. the dreaded "file modified by another application"
@@ -1119,10 +917,14 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 		// At this point, we've either captured all document content, or are writing on the main thread, so it's fine to unblock the UI
 		[self unblockUserInteraction];
 		
+        // Note that duplicating an unsaved document takes place as an AutosaveElsewhere.
+        // So if we're autosaving-elsewhere to a location that's not our own autosavedContentsFileURL,
+        // skip this step and go to the "regular channels" code path outside this block
         if (saveOperation == NSSaveOperation || saveOperation == NSAutosaveInPlaceOperation ||
-            (saveOperation == NSAutosaveElsewhereOperation && [absoluteURL isEqual:self.autosavedContentsFileURL]))
-        {
+            (saveOperation == NSAutosaveElsewhereOperation &&
+             ([absoluteURL isEqual:self.autosavedContentsFileURL] || !self.mostRecentlySavedFileURL))) {
             NSURL *backupURL = nil;
+            NSURL *autosavedContentsFileURL = self.autosavedContentsFileURL;
             
 			// As of 10.8, need to make a backup of the document when saving in-place
 			if ((saveOperation == NSSaveOperation || saveOperation == NSAutosaveInPlaceOperation) &&
@@ -1148,7 +950,12 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
                         return NO;
 					}
 				}
-			}
+            } else if (saveOperation == NSAutosaveElsewhereOperation) {
+                // If an autosave is forced early on in the document life cycle, the autosavedContentsFileURL
+                // might not be set. Go ahead and set it here so that NSDocument won't attempt to give the
+                // document a second autosave URL.
+                self.autosavedContentsFileURL = absoluteURL;
+            }
 			
 			
             // NSDocument attempts to write a copy of the document out at a temporary location.
@@ -1173,24 +980,23 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
                 // autosaving being implicitly cancellable and a subclass deciding
                 // to bail out, this HAS to be done otherwise the doc system will
                 // weirdly complain that a file by the same name already exists
-                if (backupURL)
-                {
-                    NSError *error;
-                    if (![NSFileManager.defaultManager removeItemAtURL:backupURL error:&error])
-                    {
-                        NSLog(@"Unable to remove backup after failed write: %@", error);
-                    }
+                NSError *error;
+                if (backupURL && ![NSFileManager.defaultManager removeItemAtURL:backupURL error:&error]) {
+                    NSLog(@"Unable to remove backup after failed write: %@", error);
                 }
                 
                 // The -write… method maybe wasn't to know that it's writing to the live document, so might have modified it. #179730
                 // We can patch up a bit by updating modification date so user doesn't get baffling document-edited warnings again!
+                // Note that some file systems don't support mod date so we need to test that it's not nil
                 NSDate *modDate;
-                if ([absoluteURL getResourceValue:&modDate forKey:NSURLContentModificationDateKey error:NULL])
+                if ([absoluteURL getResourceValue:&modDate forKey:NSURLContentModificationDateKey error:NULL] && modDate)
                 {
-                    if (modDate)    // some file systems don't support mod date
-                    {
-                        self.fileModificationDate = modDate;
-                    }
+                    self.fileModificationDate = modDate;
+                }
+                
+                // Restore the previous autosavedContentsFileURL if saving failed
+                if (saveOperation == NSAutosaveElsewhereOperation) {
+                    self.autosavedContentsFileURL = autosavedContentsFileURL;
                 }
             }
             
@@ -1231,22 +1037,14 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 - (BOOL)writeBackupToURL:(NSURL *)backupURL error:(NSError **)outError;
 {
     NSURL *source = self.mostRecentlySavedFileURL;
-
-    BOOL ok;
     /* In case the user inadvertently clicks File > Duplicate on a new
      document which has not been saved yet, source will be nil, so
      we check for that to avoid a subsequent NSFileManager exception. */
-	if (source)
-    {
-        /* The following also copies any additional content in the package. */
-        ok = [NSFileManager.defaultManager copyItemAtURL:source toURL:backupURL error:outError];
-    }
-    else
-    {
-        ok = YES;
-    }
+    if (!source)
+        return YES;
 
-    return ok;
+    /* The following also copies any additional content in the package. */
+    return [NSFileManager.defaultManager copyItemAtURL:source toURL:backupURL error:outError];
 }
 
 - (BOOL)writeToURL:(NSURL *)inURL
@@ -1299,53 +1097,68 @@ originalContentsURL:(NSURL *)originalContentsURL
     }
 }
 
+- (void)performBlockAndWaitOnViewContext:(void(^)(NSManagedObjectContext *))block {
+    NSManagedObjectContext *savingContext = self.managedObjectContext;
+
+    // The returned context (the container's .viewContext) needs access to the main thread to do its work.
+    // If we're on the main thread, go ahead and do it. If not, we may need to break out of the main thread's
+    // performSynchronousFileAccessUsingBlock: (e.g. the fakeSynchronousAutosave method invoked by File > Duplicate).
+    // continueAsynchronousWorkOnMainThreadUsingBlock: lets us slip in some work on the main thread, but it
+    // returns immediately, so use a semaphore to ensure the save is complete before this function returns.
+    if (NSThread.isMainThread) {
+        [savingContext performBlockAndWait:^{
+            block(savingContext);
+        }];
+    } else {
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        [self continueAsynchronousWorkOnMainThreadUsingBlock:^{
+            [savingContext performBlockAndWait:^{
+                block(savingContext);
+            }];
+            dispatch_semaphore_signal(semaphore);
+        }];
+        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+        dispatch_release(semaphore);
+    }
+}
+
 - (BOOL)writeStoreContentToURL:(NSURL *)storeURL error:(NSError **)error;
 {
     // First update metadata
-    __block BOOL result = [self updateMetadataForPersistentStore:_store error:error];
+    __block BOOL result = [self updateMetadataForPersistentStore:self.store error:error];
     if (!result) return NO;
     
-    // On 10.7+ we have to work on the context's private queue
     [self unblockUserInteraction];
-    return [self preflightURL:storeURL thenSaveContext:self.managedObjectContext.parentContext error:error];
-}
 
-- (BOOL)preflightURL:(NSURL *)storeURL thenSaveContext:(NSManagedObjectContext *)context error:(NSError **)error;
-{
     // Preflight the save since it tends to crash upon failure pre-Mountain Lion. rdar://problem/10609036
     NSNumber *writable = nil;
     if (![storeURL getResourceValue:&writable forKey:NSURLIsWritableKey error:error])
         return NO;
     
-    if (writable.boolValue)
-    {
-        // Ensure store is saving to right location
-        if ([_coordinator setURL:storeURL forPersistentStore:_store])
-        {
-            __block BOOL result = NO;
-            [context performBlockAndWait:^{
-                result = [context save:error];
-                    
-#if ! __has_feature(objc_arc)
-                // Errors need special handling to guarantee surviving crossing the block. http://www.mikeabdullah.net/cross-thread-error-passing.html
-                if (!result && error) [*error retain];
-#endif
-            }];
-                
-#if ! __has_feature(objc_arc)
-            if (!result && error) [*error autorelease]; // tidy up since any error was retained on worker thread
-#endif
-            return result;
+    // Ensure store is writeable and saving to right location
+    if (!writable.boolValue || ![self setURLForPersistentStoreUsingStoreURL:storeURL]) {
+        if (error) {
+            // Generic error. Doc/error system takes care of supplying a nice generic message to go with it
+            *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteNoPermissionError userInfo:nil];
         }
+        
+        return NO;
     }
     
-    if (error)
-    {
-        // Generic error. Doc/error system takes care of supplying a nice generic message to go with it
-        *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteNoPermissionError userInfo:nil];
-    }
-    
-    return NO;
+    // On 10.12+ saving on the viewContext goes directly to disk. There is no parentContext.
+    [self performBlockAndWaitOnViewContext:^(NSManagedObjectContext *ctx) {
+        result = [ctx save:error];
+            
+#if ! __has_feature(objc_arc)
+        // Errors need special handling to guarantee surviving crossing the block. http://www.mikeabdullah.net/cross-thread-error-passing.html
+        if (!result && error) [*error retain];
+#endif
+    }];
+        
+#if ! __has_feature(objc_arc)
+    if (!result && error) [*error autorelease]; // tidy up since any error was retained on worker thread
+#endif
+    return result;
 }
 
 #pragma mark NSDocument
@@ -1356,7 +1169,27 @@ originalContentsURL:(NSURL *)originalContentsURL
 
 - (BOOL)canAsynchronouslyWriteToURL:(NSURL *)url ofType:(NSString *)typeName forSaveOperation:(NSSaveOperationType)saveOperation;
 {
-    return [NSDocument instancesRespondToSelector:_cmd];    // opt in on 10.7+
+    // In order to provide immediate access to an NSManagedObjectContext from the main thread, we need
+    // to force an autosave so that the NSPersistentContainer has a backing store, without which attempts
+    // to save will fail. If asynchronous saving is enabled, the save itself will occur on a background
+    // thread – but the container's viewContext needs access to the main thread in order to save, resulting
+    // in a deadlock, since the main thread is still waiting for the initial autosave to complete. To prevent the
+    // deadlock, disable asynchronous writing (below) until the container has a backing store.
+    
+    // Since the viewContext uses the main queue, it's not clear how much benefit is provided by asynchronous
+    // saving anyway, as the background thread will just block while waiting for the main thread to perform its save.
+    // There will still be benefits for document subclasses that store "additional content" in the document package,
+    // see the addtionalContent* methods of this class. I believe that as long as BSManagedDocument is providing subclasses
+    // with access to the container's viewContext, then it is the viewContext that will have to be saved, and thus
+    // we'll always need main thread access for saving even with "asynchronous" writing turned on. It's possible that
+    // we could re-architect things to provide access to a background context instead, but client applications will (in
+    // my understanding) to have wrap all of their model interactions in performBlocks for the marginal benefit of enabling
+    // fully aysnchronous writing.
+    
+    // So: Enable async writing by default (after the initial write has occurred), but note that it may still end up blocking
+    // the main UI thread. I personally prefer to turn off async entirely (by overriding this method to return NO) as async
+    // writing has been the source of a number of subtle race conditions in the past. -EMM 2021-01-02
+    return self.isCoordinatorConfigured;
 }
 
 - (void)setFileURL:(NSURL *)absoluteURL
@@ -1370,23 +1203,36 @@ originalContentsURL:(NSURL *)originalContentsURL
     [super setFileURL:absoluteURL];
 }
 
+- (BOOL)setURLForPersistentStoreUsingStoreURL:(NSURL *)storeURL {
+    if (!self.isCoordinatorConfigured) return NO;
+
+    NSPersistentStoreCoordinator *coordinator = self.coordinator;
+    NSPersistentStore *store = self.store;
+    
+    __block BOOL result = NO;
+    [coordinator performBlockAndWait:^{
+        result = [coordinator setURL:storeURL forPersistentStore:store];
+    }];
+    return result;
+}
+
 - (void)setURLForPersistentStoreUsingFileURL:(NSURL *)absoluteURL;
 {
-    if (!_store) return;
+    if (!self.isCoordinatorConfigured) return;
     
     NSURL *storeURL = [[self class] persistentStoreURLForDocumentURL:absoluteURL];
     
-    if (![_coordinator setURL:storeURL forPersistentStore:_store])
+    if (![self setURLForPersistentStoreUsingStoreURL:storeURL])
     {
-        NSLog(@"Unable to set store URL");
+        NSLog(@"Unable to set store URL: %@", storeURL);
     }
 }
 
 #pragma mark Autosave
 
-/*  Enable autosave-in-place and versions browser on 10.7+
+/*  Enable autosave-in-place and versions browser, override if you don't want them
  */
-+ (BOOL)autosavesInPlace { return [NSDocument respondsToSelector:_cmd]; }
++ (BOOL)autosavesInPlace { return YES; }
 + (BOOL)preservesVersions { return self.autosavesInPlace; }
 
 - (void)setAutosavedContentsFileURL:(NSURL *)absoluteURL;
@@ -1401,10 +1247,7 @@ originalContentsURL:(NSURL *)originalContentsURL
 - (NSURL *)mostRecentlySavedFileURL;
 {
     // Before the user chooses where to place a new document, it has an autosaved URL only
-    // On 10.6-, autosaves save newer versions of the document *separate* from the original doc
-    NSURL *result = self.autosavedContentsFileURL;
-    if (!result) result = self.fileURL;
-    return result;
+    return self.autosavedContentsFileURL ?: self.fileURL;
 }
 
 /*
@@ -1570,7 +1413,7 @@ originalContentsURL:(NSURL *)originalContentsURL
     
     // Kick off an autosave
     __block BOOL result = YES;
-    [self autosaveWithImplicitCancellability:NO completionHandler:^(NSError *errorOrNil) {
+    [super autosaveWithImplicitCancellability:NO completionHandler:^(NSError *errorOrNil) {
         if (errorOrNil)
         {
             result = NO;
@@ -1653,29 +1496,6 @@ originalContentsURL:(NSURL *)originalContentsURL
 }
 
 @end
-
-/* Note JK20170624
-
- I removed code in two places which purportedly sets the document's undo
- manager as NSPersistentDocument does.  The code I removed creates a managed
- object context, which initially has nil undo manager, then later copies its
- nil undo manager to the document.  Result: document has nil undo manager.
- Furthermore, it overrides the document's -setUndoManager: to be a noop,
- making it impossible to set a non-nil undo manager later.
-
- I have not fully tested this in a demo project, although in one project
- (Veris) it seems to give a nil undo manager, as my analysis predicts.
- In any case, it is possibly not compatible with my requirement in another
- project (BkmkMgrs) of using Graham Cox' GCUndoManager instead of
- NSUndoManager.
-
- And I do not believe that the code I removed simply behaves the same as
- NSPersistentDocument, because my BkmkMgrs app had an non-nil undo manager
- before I simply replaced NSPersistentDocument with out-of-the-box
- BSManagedDocument.
-
- Jerry Krinock  2017-06-24
- */
 
 /* Note JK20180125
 

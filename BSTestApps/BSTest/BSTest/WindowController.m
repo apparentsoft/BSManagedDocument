@@ -26,26 +26,22 @@
 
 - (void)windowDidLoad {
     [super windowDidLoad];
-    [self.contentView setWantsLayer:YES];
-    CALayer *layer = self.contentView.layer;
-    [layer setBackgroundColor:[[NSColor greenColor] CGColor]];
-
+    self.contentView.wantsLayer = YES;
+    self.contentView.layer.backgroundColor = NSColor.greenColor.CGColor;
 }
 
 - (IBAction)addAFile:(id)sender {
     NSOpenPanel *openPanel = [NSOpenPanel openPanel];
-
-    [openPanel setAllowedFileTypes:@[@"public.plain-text"]];
-
-    [openPanel setAllowsMultipleSelection:NO];
+    openPanel.allowedFileTypes = @[@"public.plain-text"];
+    openPanel.allowsMultipleSelection = NO;
 
     [openPanel beginWithCompletionHandler:^(NSInteger result) {
         if (result == NSFileHandlingPanelCancelButton) {
             return;
         }
 
-        NSURL *fileUrl = [openPanel URL];
-        NSString *fileName = [[fileUrl path] lastPathComponent];
+        NSURL *fileUrl = openPanel.URL;
+        NSString *fileName = fileUrl.path.lastPathComponent;
         NSError *error;
 
         NSData *fileData = [NSData dataWithContentsOfURL:fileUrl options:NSDataReadingUncached error:&error];
