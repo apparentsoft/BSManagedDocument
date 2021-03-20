@@ -4,9 +4,9 @@
 
   *   Saves to a file package
 
-  *   On 10.7+, asynchronous saving is supported. We set up a parent/child pair of contexts; the parent saves on its own thread
+  *   Asynchronous saving is supported. We set up a parent/child pair of contexts; the parent saves on its own thread
 
-  *   Full support for concurrent document opening too
+  *   Full support for concurrent document opening
 
   *   Subclasses can hook in to manage additional content inside the package
 
@@ -21,6 +21,10 @@
   *   Subclasses may specify a custom undo manager class instead of NSUndoManager, or nil undo manager.
 
   *   And of course, full support for Autosave-In-Place and Versions
+
+## macOS System Requirements
+
+The *main* branch requires macOS 10.12 or later.  If you require support for earlier versions, use the branch named *MacOS10.11AndEarlier*.
 
 ## License (BSD)
 
