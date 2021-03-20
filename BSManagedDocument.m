@@ -1327,7 +1327,7 @@ originalContentsURL:(NSURL *)originalContentsURL
     
     // Kick off an autosave
     __block BOOL result = YES;
-    [self autosaveWithImplicitCancellability:NO completionHandler:^(NSError *errorOrNil) {
+    [super autosaveWithImplicitCancellability:NO completionHandler:^(NSError *errorOrNil) {
         if (errorOrNil)
         {
             result = NO;
@@ -1410,29 +1410,6 @@ originalContentsURL:(NSURL *)originalContentsURL
 }
 
 @end
-
-/* Note JK20170624
-
- I removed code in two places which purportedly sets the document's undo
- manager as NSPersistentDocument does.  The code I removed creates a managed
- object context, which initially has nil undo manager, then later copies its
- nil undo manager to the document.  Result: document has nil undo manager.
- Furthermore, it overrides the document's -setUndoManager: to be a noop,
- making it impossible to set a non-nil undo manager later.
-
- I have not fully tested this in a demo project, although in one project
- (Veris) it seems to give a nil undo manager, as my analysis predicts.
- In any case, it is possibly not compatible with my requirement in another
- project (BkmkMgrs) of using Graham Cox' GCUndoManager instead of
- NSUndoManager.
-
- And I do not believe that the code I removed simply behaves the same as
- NSPersistentDocument, because my BkmkMgrs app had an non-nil undo manager
- before I simply replaced NSPersistentDocument with out-of-the-box
- BSManagedDocument.
-
- Jerry Krinock  2017-06-24
- */
 
 /* Note JK20180125
 
