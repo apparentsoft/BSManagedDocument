@@ -835,6 +835,11 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
         // Right, let's get on with it!
         if (![welf writeStoreContentToURL:storeURL error:error])
         {
+            [welf spliceErrorWithCode:478220
+                 localizedDescription:@"Failed writeStoreContentToURL"
+                        likelyCulprit:storeURL
+                         intoOutError:error];
+
             [welf signalDoneAndMaybeClose];
 #if !__has_feature(objc_arc)
             [welf release];
@@ -1133,11 +1138,13 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
     {
         NSMutableDictionary<NSErrorUserInfoKey, id> *mutant = [NSMutableDictionary new];
         mutant[NSLocalizedDescriptionKey] = localizedDescription;
-        if (*outError)
-        {
-            mutant[NSUnderlyingErrorKey] = *outError;
-            mutant[@"Likely Culprit"] = likelyCulprit;
+        if (!*outError) {
+            *outError = [NSError errorWithDomain:BSManagedDocumentErrorDomain
+                                                          code:478230
+                                     userInfo:@{NSLocalizedDescriptionKey : @"Caller did not provide an underlying error"}];
         }
+        mutant[NSUnderlyingErrorKey] = *outError;
+        mutant[@"Likely Culprit"] = likelyCulprit;
         NSDictionary<NSErrorUserInfoKey, id> *userInfo = [mutant copy];
         NSError* overlyingError = [NSError errorWithDomain:BSManagedDocumentErrorDomain
                                                       code:code
@@ -1149,7 +1156,9 @@ we use a weak self (`welf`) when compiling with ARC.  We should make these two
 #endif
     }
     
-    return YES;  // Silence stupid compiler warning
+    /* We never use this return value.  However, the stupid static analyzer
+     insists that any method taking an NSError** parameter must return a BOOL. */
+    return YES;
 }
 
 
