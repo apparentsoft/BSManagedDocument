@@ -1387,6 +1387,48 @@ originalContentsURL:(NSURL *)originalContentsURL
             __block BOOL result = NO;
             [context performBlockAndWait:^{
                 result = [context save:error];
+                if (error) {
+                    if ([(*error).domain isEqualToString:NSSQLiteErrorDomain] && ((*error).code == 779)) {
+                        /* Corrupt index in the sqlite database, which maybe we can
+                         fix.  I have seen this work in the field at least once.
+                         See https://www.sqlite.org/rescode.html#corrupt_index */
+                        NSString* sqlitePath = @"/usr/bin/sqlite3";
+                        if ([[NSFileManager defaultManager] fileExistsAtPath:sqlitePath]) {
+                            NSString* path = _store.URL.path;
+                            NSTask* task = [NSTask new];
+                            task.launchPath = sqlitePath;
+                            task.arguments = @[path, @"reindex"];
+                            [task launch];
+                            [task waitUntilExit];
+                            int status = [task terminationStatus];
+                            NSString* fixResult;
+                            NSString* recoverySuggestion = nil;
+                            if (status == 0) {
+                                fixResult = @"We maybe fixed it.";
+                                recoverySuggestion = @"Try to save the document again.";
+                            } else {
+                                fixResult = [NSString stringWithFormat:
+                                             @"We tried but supposedly failed to fix it by running 'sqlite3 ... reindex'.  Got status %ld, expected 0",
+                                             (long)status];
+                            }
+                            NSString* desc = [NSString stringWithFormat:@"Document was found to have a corrupt SQLite index. %@", fixResult];
+                            NSMutableDictionary* userInfo = [NSMutableDictionary new];
+                            [userInfo setObject:desc
+                                         forKey:NSLocalizedDescriptionKey];
+                            [userInfo setValue:*error
+                                        forKey:NSUnderlyingErrorKey];
+                            [userInfo setValue:recoverySuggestion
+                                        forKey:NSLocalizedRecoverySuggestionErrorKey];
+                            *error = [NSError errorWithDomain:BSManagedDocumentErrorDomain
+                                                         code:478230
+                                                     userInfo:userInfo];
+#if ! __has_feature(objc_arc)
+                            [task release];
+                            [userInfo release];
+#endif
+                        }
+                    }
+                }
                     
 #if ! __has_feature(objc_arc)
                 // Errors need special handling to guarantee surviving crossing the block. http://www.mikeabdullah.net/cross-thread-error-passing.html
