@@ -330,7 +330,22 @@ operation is completed.
     NSError *error = nil;
     if (![self removePersistentStoreWithError:&error])
         NSLog(@"Unable to remove persistent store before closing: %@", error);
-    [super close];
+    
+    /* We do a main thread dance here because, if asynchronous saving is
+     enabled, super -[NSDocument close] will usually close a document window,
+     which will probably send -windowWillClose to a window controller, which
+     may need to clean up some stuff in the user interface that probably needs
+     to be done on the main thread.  At least, it does in my (Jerry) apps.  */
+    if (NSThread.isMainThread)
+    {
+        [super close];
+    }
+    else
+    {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            [super close];
+        });
+    }
     [self deleteAutosavedContentsTempDirectory];
 }
 
@@ -642,13 +657,51 @@ operation is completed.
             }
         }
         
+#if !__has_feature(objc_arc)
+        [welf retain];
+#endif
         // Right, let's get on with it!
         if (![welf writeStoreContentToURL:storeURL error:error])
         {
+            [welf spliceErrorWithCode:478220
+                 localizedDescription:@"Failed writeStoreContentToURL"
+                        likelyCulprit:storeURL
+                         intoOutError:error];
+
             [welf signalDoneAndMaybeClose];
+#if !__has_feature(objc_arc)
+            [welf release];
+#endif
             return NO;
         }
         
+        /* 2020-May-17  Damn.  Still seeing crashes here
+         once a week or so when running in Xcode debugger in non-ARC, possibly
+         after letting a dialog sit without responding for several minutes,
+         or maybe just letting the app sit idle for a few minutes.
+         I have seen two types of crashes:
+         
+         1.  Unexplained EXC_BAD_ACCESS
+         2.  -[CAContextImpl writeAdditionalContent:toURL:originalContentsURL:error:]: unrecognized selector sent to instance …
+         
+         Crash type number 2 implies that the weak self `welf` is gone and the
+         message is being sent to some other object which took its memory, but
+         why does it crash *here* when, in the lines above, many messages are
+         sent to `welf` and none of those ever crash?
+         
+         Maybe the call to -writeStoreContentToURL:error: waits for the save
+         to happen, and that is when `welf` disappears.  To save time, I am
+         going to skip the analysis and try to fix this with something that
+         should do no harm in any case: Send `welf` a -retain above and balance
+         with a -release before each of the two `return` statements, below.
+         If you see no further comment here for the rest of year 2020, that
+         means that this fix worked.  It does make sense, at least :)
+         
+         2020-Jul-14  Still making crashes here, with macOS 11 Beta 2.
+         Looks like the same as crash type 2 above, but welf got smashed
+         by a different object:
+         -[_NSCoreDataTaggedObjectID writeAdditionalContent:toURL:originalContentsURL:error:]: unrecognized selector sent to instance
+         */
         result = [welf writeAdditionalContent:additionalContent toURL:url originalContentsURL:originalContentsURL error:error];
         if (result)
         {
@@ -669,6 +722,9 @@ operation is completed.
                         likelyCulprit:url
                          intoOutError:error];
             [welf signalDoneAndMaybeClose];
+#if !__has_feature(objc_arc)
+            [welf release];
+#endif
             return NO;
         }
         
@@ -682,6 +738,9 @@ operation is completed.
         }
         
         [welf signalDoneAndMaybeClose];
+#if !__has_feature(objc_arc)
+        [welf release];
+#endif
         return result;
     };
     
@@ -878,11 +937,13 @@ operation is completed.
     {
         NSMutableDictionary<NSErrorUserInfoKey, id> *mutant = [NSMutableDictionary new];
         mutant[NSLocalizedDescriptionKey] = localizedDescription;
-        if (*outError)
-        {
-            mutant[NSUnderlyingErrorKey] = *outError;
-            mutant[@"Likely Culprit"] = likelyCulprit;
+        if (!*outError) {
+            *outError = [NSError errorWithDomain:BSManagedDocumentErrorDomain
+                                                          code:478230
+                                     userInfo:@{NSLocalizedDescriptionKey : @"Caller did not provide an underlying error"}];
         }
+        mutant[NSUnderlyingErrorKey] = *outError;
+        mutant[@"Likely Culprit"] = likelyCulprit;
         NSDictionary<NSErrorUserInfoKey, id> *userInfo = [mutant copy];
         NSError* overlyingError = [NSError errorWithDomain:BSManagedDocumentErrorDomain
                                                       code:code
@@ -894,7 +955,9 @@ operation is completed.
 #endif
     }
     
-    return YES;  // Silence stupid compiler warning
+    /* We never use this return value.  However, the stupid static analyzer
+     insists that any method taking an NSError** parameter must return a BOOL. */
+    return YES;
 }
 
 
@@ -1122,6 +1185,51 @@ originalContentsURL:(NSURL *)originalContentsURL
     }
 }
 
+- (void)fixIfCorruptIndex:(NSError **)error {
+    if (error) {
+        if ([(*error).domain isEqualToString:NSSQLiteErrorDomain] && ((*error).code == 779)) {
+            /* Corrupt index in the sqlite database, which maybe we can
+             fix.  I have seen this work in the field at least once.
+             See https://www.sqlite.org/rescode.html#corrupt_index */
+            NSString* sqlitePath = @"/usr/bin/sqlite3";
+            if ([[NSFileManager defaultManager] fileExistsAtPath:sqlitePath]) {
+                NSString* path = self.store.URL.path;
+                NSTask* task = [NSTask new];
+                task.launchPath = sqlitePath;
+                task.arguments = @[path, @"reindex"];
+                [task launch];
+                [task waitUntilExit];
+                int status = [task terminationStatus];
+                NSString* fixResult;
+                NSString* recoverySuggestion = nil;
+                if (status == 0) {
+                    fixResult = @"We maybe fixed it.";
+                    recoverySuggestion = @"Try to save the document again.";
+                } else {
+                    fixResult = [NSString stringWithFormat:
+                                 @"We tried but supposedly failed to fix it by running 'sqlite3 ... reindex'.  Got status %ld, expected 0",
+                                 (long)status];
+                }
+                NSString* desc = [NSString stringWithFormat:@"Document was found to have a corrupt SQLite index. %@", fixResult];
+                NSMutableDictionary* userInfo = [NSMutableDictionary new];
+                [userInfo setObject:desc
+                             forKey:NSLocalizedDescriptionKey];
+                [userInfo setValue:*error
+                            forKey:NSUnderlyingErrorKey];
+                [userInfo setValue:recoverySuggestion
+                            forKey:NSLocalizedRecoverySuggestionErrorKey];
+                *error = [NSError errorWithDomain:BSManagedDocumentErrorDomain
+                                             code:478230
+                                         userInfo:userInfo];
+#if ! __has_feature(objc_arc)
+                [task release];
+                [userInfo release];
+#endif
+            }
+        }
+    }
+}
+
 - (BOOL)writeStoreContentToURL:(NSURL *)storeURL error:(NSError **)error;
 {
     // First update metadata
@@ -1148,7 +1256,8 @@ originalContentsURL:(NSURL *)originalContentsURL
     // On 10.12+ saving on the viewContext goes directly to disk. There is no parentContext.
     [self performBlockAndWaitOnViewContext:^(NSManagedObjectContext *ctx) {
         result = [ctx save:error];
-            
+        [self fixIfCorruptIndex:error];
+
 #if ! __has_feature(objc_arc)
         // Errors need special handling to guarantee surviving crossing the block. http://www.mikeabdullah.net/cross-thread-error-passing.html
         if (!result && error) [*error retain];
