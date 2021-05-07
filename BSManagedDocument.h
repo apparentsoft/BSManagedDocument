@@ -100,19 +100,7 @@ __attribute__((visibility("default"))) @interface BSManagedDocument : NSDocument
  returns the given path. */
 + (NSString *)storePathForDocumentPath:(NSString*)path;
 
-/**
- @brief    Given the path to the database (SQLite file), returns the path to
- the document
-
- @details  This is useful if you are watching a database file for changes and
- want to know what document changed.  It uses quite a boneheaded algorithm,
- just looking at the directory structure and for the given document extension.
-
- @return  If the target document is deemed to be a flat file, returns the
- given `path`.  If the target document is deemed to be a package, returns the
- path to the package.  Otherwise, returns nil. */
-+ (NSString *)documentPathForStorePath:(NSString*)path
-                     documentExtension:(NSString*)extension;
++ (NSURL *)persistentStoreURLForDocumentURL:(NSURL *)fileURL;
 
 /*!
  @brief    Returns the desired class of instances' undo manager
