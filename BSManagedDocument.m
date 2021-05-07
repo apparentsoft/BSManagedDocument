@@ -1163,7 +1163,9 @@ originalContentsURL:(NSURL *)originalContentsURL
     }
 }
 
-- (void)fixIfCorruptIndex:(NSError **)error {
+/* This method returns BOOL YES to silence a stupid compiler warning in
+ Xcode 12.5 > Analyze. */
+- (BOOL)fixIfCorruptIndex:(NSError **)error {
     if (error) {
         if ([(*error).domain isEqualToString:NSSQLiteErrorDomain] && ((*error).code == 779)) {
             /* Corrupt index in the sqlite database, which maybe we can
@@ -1206,6 +1208,8 @@ originalContentsURL:(NSURL *)originalContentsURL
             }
         }
     }
+    
+    return YES;
 }
 
 - (BOOL)writeStoreContentToURL:(NSURL *)storeURL error:(NSError **)error;
