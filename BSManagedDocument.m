@@ -1405,7 +1405,7 @@ originalContentsURL:(NSURL *)originalContentsURL
     (void)[self managedObjectContext];
     
     // Make sure copy on disk is up-to-date
-    if (![self fakeSynchronousAutosaveAndReturnError:nil]) return;
+    if (![self fakeSynchronousAutosaveAndReturnError:nil]) return completionHandler(NO);
     
     // As with file duplication, the actual save operation will be an "autosave elsewhere"
     [super shareDocumentWithSharingService:sharingService completionHandler:completionHandler];
