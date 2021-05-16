@@ -20,7 +20,7 @@
   
   *   Subclasses may specify a custom undo manager class instead of NSUndoManager, or nil undo manager.
 
-  *   And of course, full support for Autosave-In-Place and Versions
+  *   Full support for Autosave-In-Place, Versions, and Sharing (Share menu requires macOS 10.13 or later)
 
 ## macOS System Requirements
 
