@@ -506,101 +506,7 @@ operation is completed.
                 return NO;
             }
         }
-        else
-        {
-            if (welf.class.autosavesInPlace)
-            {
-                if (saveOperation == NSAutosaveElsewhereOperation)
-                {
-                    // Special-case autosave-elsewhere for 10.7+ documents that have been saved
-                    // e.g. reverting a doc that has unautosaved changes
-                    // The system asks us to autosave it to some temp location before closing
-                    // CAN'T save-in-place to achieve that, since the doc system is expecting us to leave the original doc untouched, ready to load up as the "reverted" version
-                    // But the doc system also asks to do this when performing a Save As operation, and choosing to discard unsaved edits to the existing doc. In which case the SQLite store moves out underneath us and we blow up shortly after
-                    // Doc system apparently considers it fine to fail at this, since it passes in NULL as the error pointer
-                    // With great sadness and wretchedness, that's the best workaround I have for the moment
-                    NSURL *fileURL = welf.fileURL;
-                    if (fileURL)
-                    {
-                        NSURL *autosaveURL = welf.autosavedContentsFileURL;
-                        if (!autosaveURL)
-                        {
-                            // Make a copy of the existing doc to a location we control first
-                            NSURL *autosaveTempDirectory = [NSFileManager.defaultManager URLForDirectory:NSItemReplacementDirectory
-                                                                                                  inDomain:NSUserDomainMask
-                                                                                         appropriateForURL:fileURL
-                                                                                                    create:YES
-                                                                                                     error:error];
-                            if (!autosaveTempDirectory) {
-                                [welf spliceErrorWithCode:478210
-                                     localizedDescription:@"Failed getting IRD"
-                                            likelyCulprit:fileURL
-                                             intoOutError:error];
-                                [welf signalDoneAndMaybeClose];
-                                return NO;
-                            }
-                            welf.autosavedContentsTempDirectoryURL = autosaveTempDirectory;
-                            
-                            autosaveURL = [autosaveTempDirectory URLByAppendingPathComponent:fileURL.lastPathComponent];
-                            if (![welf writeBackupToURL:autosaveURL error:error])
-                            {
-                                [welf spliceErrorWithCode:478211
-                                     localizedDescription:@"Failed writing to backup URL"
-                                            likelyCulprit:autosaveURL
-                                             intoOutError:error];
-                                [welf signalDoneAndMaybeClose];
-                                return NO;
-                            }
-                            
-                            welf.autosavedContentsFileURL = autosaveURL;
-                        }
-                        
-                        // Bring the autosaved doc up-to-date
-                        NSURL* storeURL = [welf.class persistentStoreURLForDocumentURL:autosaveURL];
-                        result = [welf writeStoreContentToURL:storeURL
-                                                        error:error];
-                        if (!result)
-                        {
-                            [welf spliceErrorWithCode:478212
-                                 localizedDescription:@"Failed writing store content"
-                                        likelyCulprit:storeURL
-                                         intoOutError:error];
-                            [welf signalDoneAndMaybeClose];
-                            return NO;
-                        }
-
-                        result = [welf writeAdditionalContent:additionalContent
-                                                        toURL:autosaveURL
-                                          originalContentsURL:originalContentsURL
-                                                        error:error];
-                        if (!result)
-                        {
-                            [welf spliceErrorWithCode:478213
-                                 localizedDescription:@"Failed writing additional content"
-                                        likelyCulprit:autosaveURL
-                                         intoOutError:error];
-                            [welf signalDoneAndMaybeClose];
-                            return NO;
-                        }
-                        
-                        
-                        // Then copy that across to the final URL
-                        result = [self writeBackupToURL:url error:error];
-                        if (!result)
-                        {
-                            [welf spliceErrorWithCode:478214
-                                 localizedDescription:@"Failed copying to final URL"
-                                        likelyCulprit:url
-                                         intoOutError:error];
-                            [welf signalDoneAndMaybeClose];
-                            return NO;
-                        }
-                    }
-                }
-            }
-            else
-            {
-                if (saveOperation != NSSaveOperation && saveOperation != NSAutosaveInPlaceOperation)
+        else if (saveOperation != NSSaveOperation && saveOperation != NSAutosaveInPlaceOperation)
                 {
                     if (![storeURL checkResourceIsReachableAndReturnError:NULL])
                     {
@@ -632,8 +538,6 @@ operation is completed.
                         }
                     }
                 }
-            }
-        }
         
 #if !__has_feature(objc_arc)
         [welf retain];
@@ -962,8 +866,7 @@ operation is completed.
         // So if we're autosaving-elsewhere to a location that's not our own autosavedContentsFileURL,
         // skip this step and go to the "regular channels" code path outside this block
         if (saveOperation == NSSaveOperation || saveOperation == NSAutosaveInPlaceOperation ||
-            (saveOperation == NSAutosaveElsewhereOperation &&
-             ([absoluteURL isEqual:self.autosavedContentsFileURL] || !self.mostRecentlySavedFileURL))) {
+            saveOperation == NSAutosaveElsewhereOperation) {
             NSURL *backupURL = nil;
             NSURL *autosavedContentsFileURL = self.autosavedContentsFileURL;
             
@@ -992,22 +895,37 @@ operation is completed.
 					}
 				}
             } else if (saveOperation == NSAutosaveElsewhereOperation) {
-                // If an autosave is forced early on in the document life cycle, the autosavedContentsFileURL
-                // might not be set. Go ahead and set it here so that NSDocument won't attempt to give the
-                // document a second autosave URL.
-                self.autosavedContentsFileURL = absoluteURL;
+                // "Autosave Elsewhere" is abused by NSDocument for all kinds of things
+                if (!self.mostRecentlySavedFileURL) {
+                    // If an autosave is forced early on in the document life cycle, the autosavedContentsFileURL
+                    // might not be set. Go ahead and set it here so that NSDocument won't attempt to give the
+                    // document a second autosave URL.
+                    self.autosavedContentsFileURL = absoluteURL;
+                } else if (!self.autosavedContentsFileURL && self.hasUnautosavedChanges) {
+                    // This looks like NSDocument is trying to preserve a document version prior to a Revert.
+                    self.autosavedContentsFileURL = absoluteURL;
+                } else if (![absoluteURL isEqual:self.autosavedContentsFileURL]) {
+                    // We're supposed to blast a copy out somewhere else e.g.:
+                    // * A temporary Share location
+                    // * A Duplicate location in the autosave folder
+                    // We ensured the disk copy is up-to-date earlier inside the overrides to
+                    // duplicateAndReturnError: and shareDocumentWithSharingService:completionHandler:
+                    self.writingBlock = ^(NSURL *url, NSSaveOperationType saveOperation, NSURL *originalContentsURL, NSError **error) {
+                        return [self writeBackupToURL:url error:error];
+                    };
+                }
             }
-			
 			
             // NSDocument attempts to write a copy of the document out at a temporary location.
             // Core Data cannot support this, so we override it to save directly.
-            // The following call is synchronous.  It does not return until
-            // saving ia all done
+            // The following call is synchronous.  It does not return until saving is all done.
             result = [self writeToURL:absoluteURL
                                ofType:typeName
                      forSaveOperation:saveOperation
                   originalContentsURL:self.fileURL
                                 error:outError];
+            
+            self.writingBlock = nil; // May have been set above
             
             if (!result)
             {
@@ -1457,7 +1375,7 @@ originalContentsURL:(NSURL *)originalContentsURL
     Block_release(contextInfo);
 }
 
-#pragma mark Duplicating Documents
+#pragma mark Duplicating and Sharing Documents
 
 - (NSDocument *)duplicateAndReturnError:(NSError **)outError;
 {
@@ -1470,31 +1388,27 @@ originalContentsURL:(NSURL *)originalContentsURL
      with ARC in macOS 10.15.)  Anyhow, initializing variables is always a
      good practice!  */
     
-    // If the doc is brand new, have to force the autosave to write to disk
-    if (!self.fileURL && !self.autosavedContentsFileURL && !self.hasUnautosavedChanges)
-    {
-        [self updateChangeCount:NSChangeDone];
-        NSDocument *result = [self duplicateAndReturnError:outError];
-        [self updateChangeCount:NSChangeUndone];
-        return result;
-    }
-    
+    // Accessing the MOC ensures a backing store exists
+    (void)[self managedObjectContext];
     
     // Make sure copy on disk is up-to-date
     if (![self fakeSynchronousAutosaveAndReturnError:outError]) return nil;
     
-    
     // Let super handle the overall duplication so it gets the window-handling
-    // right. But use custom writing logic that actually copies the existing doc
-    BOOL (^writingBlock)(NSURL*, NSSaveOperationType, NSURL*, NSError**) = ^(NSURL *url, NSSaveOperationType saveOperation, NSURL *originalContentsURL, NSError **error) {
-        return [self writeBackupToURL:url error:error];
-    };
+    // The writing itself occurs as an "autosave elsewhere" to somewhere other
+    // than the autosavedContentsFileURL
+    return [super duplicateAndReturnError:outError];
+}
+
+- (void)shareDocumentWithSharingService:(NSSharingService *)sharingService completionHandler:(void (^)(BOOL))completionHandler API_AVAILABLE(macos(10.13)) {
+    // Accessing the MOC ensures a backing store exists
+    (void)[self managedObjectContext];
     
-    self.writingBlock = writingBlock;
-    NSDocument *result = [super duplicateAndReturnError:outError];
-    self.writingBlock = nil;
+    // Make sure copy on disk is up-to-date
+    if (![self fakeSynchronousAutosaveAndReturnError:nil]) return completionHandler(NO);
     
-    return result;
+    // As with file duplication, the actual save operation will be an "autosave elsewhere"
+    [super shareDocumentWithSharingService:sharingService completionHandler:completionHandler];
 }
 
 /*  Approximates a synchronous version of -autosaveDocumentWithDelegate:didAutosaveSelector:contextInfo:    */
