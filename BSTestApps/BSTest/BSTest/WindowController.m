@@ -35,8 +35,8 @@
     openPanel.allowedFileTypes = @[@"public.plain-text"];
     openPanel.allowsMultipleSelection = NO;
 
-    [openPanel beginWithCompletionHandler:^(NSInteger result) {
-        if (result == NSFileHandlingPanelCancelButton) {
+    [openPanel beginWithCompletionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseCancel) {
             return;
         }
 
