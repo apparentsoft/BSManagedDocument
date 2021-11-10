@@ -792,24 +792,6 @@ operation is completed.
     }];
 }
 
-#if MAC_OS_X_VERSION_MAX_ALLOWED < 101300
-/* Documentation says that this method was deprecated in macOS 10.7, but I did
- not get any compiler warnings until compiling with 10.13 SDK.  Oh, well; the
- above #if is to avoid the warning. */
-- (BOOL)saveToURL:(NSURL *)url ofType:(NSString *)typeName forSaveOperation:(NSSaveOperationType)saveOperation error:(NSError **)outError;
-{
-    BOOL result = [super saveToURL:url ofType:typeName forSaveOperation:saveOperation error:outError];
-    
-    if (result &&
-        (saveOperation == NSSaveOperation || saveOperation == NSAutosaveInPlaceOperation || saveOperation == NSSaveAsOperation))
-    {
-        [self deleteAutosavedContentsTempDirectory];
-    }
-    
-    return result;
-}
-#endif
-
 - (BOOL)spliceErrorWithCode:(NSInteger)code
        localizedDescription:(NSString*)localizedDescription
               likelyCulprit:(id)likelyCulprit
